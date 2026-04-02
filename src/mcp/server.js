@@ -17,7 +17,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
 
 export const SERVER_INFO = {
   name: 'chat-search',
-  version: '0.1.6',
+  version: '0.1.7',
 };
 
 export function negotiateProtocolVersion(requestedVersion) {
