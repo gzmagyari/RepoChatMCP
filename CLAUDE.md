@@ -13,7 +13,21 @@ npm test                    # Run all tests (node --test tests/*.test.js)
 npm start                   # Start MCP server (node ./bin/chat-search.js)
 node --test tests/foo.test.js  # Run a single test file
 npm link                    # Make `chat-search` available globally
+
+# CLI subcommands
+chat-search mcp --repo /path/to/repo     # Start as MCP server
+chat-search search --query "foo" --repo . # Search from CLI
+chat-search status --repo .               # Show discovered sessions
 ```
+
+## Environment variables
+
+Config resolution order: CLI flags → env vars → defaults.
+
+- `CHAT_SEARCH_REPO_PATH` — Target repo path (default: cwd)
+- `CHAT_SEARCH_CLAUDE_ROOT` — Claude projects dir (default: `~/.claude/projects`)
+- `CHAT_SEARCH_CODEX_SESSIONS` — Codex sessions dir (default: `~/.codex/sessions`)
+- `CHAT_SEARCH_CODEX_ARCHIVED` — Codex archived sessions dir (default: `~/.codex/archived_sessions`)
 
 ## Architecture
 
@@ -29,9 +43,15 @@ The data flow is: **discovery → normalization → search/knowledge → MCP or 
 - **`src/cli.js`** — Entry point for `mcp`, `search`, and `status` subcommands.
 - **`src/utils.js`** — Shared helpers: JSONL reader, text scoring, tokenizer, arg parser, path normalization.
 
+## Tests
+
+Four test files mirror the source modules: `normalizer.test.js`, `search.test.js`, `knowledge.test.js`, `mcp.test.js`. Tests use Node's built-in test runner (`node:test` + `node:assert`) — no test framework dependencies. The MCP test uses a mock stdio transport to test the full JSON-RPC request/response cycle.
+
 ## Key design decisions
 
 - All file I/O is synchronous (`readFileSync`, `readdirSync`, `statSync`) — intentional for simplicity since sessions are local files.
 - The MCP server caches parsed sessions and invalidates by checking file mtime + size on each request.
 - Grep patterns use `&` for AND, `|` for OR, and `/regex/flags` for regex — this is a custom syntax, not standard grep.
 - The `normalizeRepoPath` function lowercases drive letters and normalizes to forward slashes — this matters for cross-platform path matching.
+- Codex archived sessions (`~/.codex/archived_sessions/`) are included by default (`includeArchived` flag).
+- The MCP server entry point is `bin/chat-search.js` → `src/cli.js` → `src/mcp/server.js`. The CLI parses the first positional arg as the subcommand (`mcp`, `search`, `status`).

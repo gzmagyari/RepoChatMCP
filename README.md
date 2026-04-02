@@ -131,13 +131,15 @@ Add to your `.mcp.json`:
   "mcpServers": {
     "chat-search": {
       "command": "node",
-      "args": ["/path/to/chat-search/bin/chat-search.js", "mcp"]
+      "args": ["./bin/chat-search.js"]
     }
   }
 }
 ```
 
-Claude Code sets the working directory automatically, so the MCP will discover sessions for whatever repo you're in.
+If you cloned this repo directly, that relative path is enough. Claude Code runs the project MCP from the repo, so `chat-search` can use the current working directory as the target repo without `--repo`.
+
+If you want to point at a different checkout instead of the current repo, use an absolute path or pass `--repo`.
 
 ## Use as an MCP in Codex
 
@@ -146,7 +148,7 @@ Add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.chat_search]
 command = "node"
-args = ["/path/to/chat-search/bin/chat-search.js", "mcp"]
+args = ["/path/to/chat-search/bin/chat-search.js"]
 ```
 
 ## Tests

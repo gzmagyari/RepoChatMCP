@@ -6,6 +6,24 @@ import { searchMessages, grepMessages, readSession, readLines } from '../search.
 import { collectBaseKnowledge, writeKnowledgeToFile } from '../knowledge.js';
 import { clip } from '../utils.js';
 
+export const SUPPORTED_PROTOCOL_VERSIONS = [
+  '2025-06-18',
+  '2025-03-26',
+  '2024-11-05',
+];
+
+export const SERVER_INFO = {
+  name: 'chat-search',
+  version: '0.1.0',
+};
+
+export function negotiateProtocolVersion(requestedVersion) {
+  if (SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)) {
+    return requestedVersion;
+  }
+  return SUPPORTED_PROTOCOL_VERSIONS[0];
+}
+
 /**
  * Session cache entry: stores normalized session data and file stat for invalidation.
  */
@@ -171,10 +189,7 @@ const TOOLS = [
   },
 ];
 
-/**
- * Run the MCP server.
- */
-export async function runMcpServer(config) {
+export function createMcpRequestHandler(config) {
   const cache = new SessionCache();
   let sessionFiles = null;
 
@@ -283,44 +298,58 @@ export async function runMcpServer(config) {
     }
   }
 
-  const server = new StdioJsonRpcServer({
-    onRequest: async (message) => {
-      const { method, params } = message;
+  return async function handleRequest(message) {
+    const { method, params } = message;
 
-      if (method === 'initialize') {
+    if (method === 'initialize') {
+      return {
+        protocolVersion: negotiateProtocolVersion(params?.protocolVersion),
+        capabilities: {
+          tools: {
+            listChanged: false,
+          },
+        },
+        serverInfo: SERVER_INFO,
+      };
+    }
+
+    if (method === 'ping') {
+      return {};
+    }
+
+    if (method === 'tools/list') {
+      return { tools: TOOLS };
+    }
+
+    if (method === 'tools/call') {
+      const toolName = params?.name;
+      const toolParams = params?.arguments || {};
+      try {
+        const result = await handleToolCall(toolName, toolParams);
         return {
-          protocolVersion: '2024-11-05',
-          capabilities: { tools: {} },
-          serverInfo: { name: 'chat-search', version: '1.0.0' },
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          isError: false,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Error: ${err.message}` }],
+          isError: true,
         };
       }
+    }
 
-      if (method === 'tools/list') {
-        return { tools: TOOLS };
-      }
+    throw new Error(`Unknown method: ${method}`);
+  };
+}
 
-      if (method === 'tools/call') {
-        const toolName = params?.name;
-        const toolParams = params?.arguments || {};
-        try {
-          const result = await handleToolCall(toolName, toolParams);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-          };
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err.message}` }],
-            isError: true,
-          };
-        }
-      }
+/**
+ * Run the MCP server.
+ */
+export async function runMcpServer(config) {
+  const handleRequest = createMcpRequestHandler(config);
 
-      if (method === 'notifications/initialized') {
-        return undefined;
-      }
-
-      throw new Error(`Unknown method: ${method}`);
-    },
+  const server = new StdioJsonRpcServer({
+    onRequest: handleRequest,
     onNotification: async () => {},
   });
 

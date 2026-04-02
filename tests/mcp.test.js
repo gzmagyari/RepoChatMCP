@@ -44,10 +44,43 @@ function setupTempFixtures() {
   };
 }
 
+function readJsonLineResponse(proc) {
+  return new Promise((resolve, reject) => {
+    let responseBuffer = '';
+
+    function onData(chunk) {
+      responseBuffer += chunk.toString('utf8');
+      const newlineIndex = responseBuffer.indexOf('\n');
+      if (newlineIndex === -1) {
+        return;
+      }
+
+      const responseBody = responseBuffer.slice(0, newlineIndex).trim();
+      proc.stdout.removeListener('data', onData);
+      try {
+        resolve(JSON.parse(responseBody));
+      } catch (err) {
+        reject(new Error(`Invalid JSON response: ${err.message}`));
+      }
+    }
+
+    proc.stdout.on('data', onData);
+  });
+}
+
 /**
- * Send a JSON-RPC message over stdin and read the JSON-RPC response from stdout.
+ * Send a JSON-RPC message as a single JSON line and read the JSON line response.
  */
 function sendRpc(proc, message) {
+  const response = readJsonLineResponse(proc);
+  proc.stdin.write(`${JSON.stringify(message)}\n`);
+  return response;
+}
+
+/**
+ * Send a legacy Content-Length framed JSON-RPC message and read the framed response.
+ */
+function sendFramedRpc(proc, message) {
   return new Promise((resolve, reject) => {
     const body = Buffer.from(JSON.stringify(message), 'utf8');
     const header = `Content-Length: ${body.length}\r\n\r\n`;
@@ -58,7 +91,6 @@ function sendRpc(proc, message) {
     function onData(chunk) {
       responseBuffer = Buffer.concat([responseBuffer, chunk]);
 
-      // Try to parse response
       while (true) {
         if (expectedLength === null) {
           const headerEnd = responseBuffer.indexOf('\r\n\r\n');
@@ -76,9 +108,6 @@ function sendRpc(proc, message) {
         if (responseBuffer.length < expectedLength) return;
 
         const responseBody = responseBuffer.slice(0, expectedLength).toString('utf8');
-        responseBuffer = responseBuffer.slice(expectedLength);
-        expectedLength = null;
-
         proc.stdout.removeListener('data', onData);
         try {
           resolve(JSON.parse(responseBody));
@@ -101,7 +130,6 @@ function sendRpc(proc, message) {
 function spawnMcp(fixtures) {
   const args = [
     binScript,
-    'mcp',
     '--repo', '/tmp/test-repo',
     '--claude-root', fixtures.claudeRoot,
     '--codex-sessions', fixtures.codexSessions,
@@ -136,6 +164,32 @@ test('MCP: initialize returns valid server info', async () => {
     assert.ok(response.result, 'should have result');
     assert.equal(response.result.protocolVersion, '2024-11-05');
     assert.ok(response.result.serverInfo, 'should have serverInfo');
+    assert.equal(response.result.serverInfo.name, 'chat-search');
+  } finally {
+    proc.kill();
+    fixtures.cleanup();
+  }
+});
+
+test('MCP: initialize also works with legacy Content-Length framing', async () => {
+  const fixtures = setupTempFixtures();
+  const proc = spawnMcp(fixtures);
+
+  try {
+    const response = await sendFramedRpc(proc, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'test', version: '1.0.0' },
+      },
+    });
+
+    assert.equal(response.jsonrpc, '2.0');
+    assert.equal(response.id, 1);
+    assert.equal(response.result.protocolVersion, '2024-11-05');
     assert.equal(response.result.serverInfo.name, 'chat-search');
   } finally {
     proc.kill();

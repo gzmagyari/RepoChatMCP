@@ -5,6 +5,7 @@ export class StdioJsonRpcServer {
     this.logger = logger;
     this.buffer = Buffer.alloc(0);
     this.expectedLength = null;
+    this.transportMode = null;
     process.stdin.on('data', (chunk) => this.handleChunk(chunk));
     process.stdin.on('error', (error) => this.logger(error));
   }
@@ -15,6 +16,61 @@ export class StdioJsonRpcServer {
 
   handleChunk(chunk) {
     this.buffer = Buffer.concat([this.buffer, Buffer.from(chunk)]);
+
+    if (!this.transportMode) {
+      this.transportMode = this.detectTransportMode();
+      if (!this.transportMode) {
+        return;
+      }
+    }
+
+    if (this.transportMode === 'json-lines') {
+      this.handleJsonLines();
+      return;
+    }
+
+    this.handleContentLengthFrames();
+  }
+
+  detectTransportMode() {
+    const text = this.buffer.toString('utf8');
+    const trimmed = text.replace(/^\uFEFF?[\s\r\n]*/, '');
+
+    if (!trimmed) {
+      return null;
+    }
+
+    if ('Content-Length:'.startsWith(trimmed) || trimmed.startsWith('Content-Length:')) {
+      return 'content-length';
+    }
+
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return 'json-lines';
+    }
+
+    return null;
+  }
+
+  handleJsonLines() {
+    while (true) {
+      const newlineIndex = this.buffer.indexOf('\n');
+      if (newlineIndex === -1) {
+        return;
+      }
+
+      const lineBuffer = this.buffer.slice(0, newlineIndex);
+      this.buffer = this.buffer.slice(newlineIndex + 1);
+
+      const line = lineBuffer.toString('utf8').trim();
+      if (!line) {
+        continue;
+      }
+
+      this.handleMessage(line);
+    }
+  }
+
+  handleContentLengthFrames() {
     while (true) {
       if (this.expectedLength == null) {
         const headerEnd = this.buffer.indexOf('\r\n\r\n');
@@ -67,6 +123,11 @@ export class StdioJsonRpcServer {
   }
 
   send(message) {
+    if (this.transportMode !== 'content-length') {
+      process.stdout.write(`${JSON.stringify(message)}\n`);
+      return;
+    }
+
     const body = Buffer.from(JSON.stringify(message), 'utf8');
     const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'utf8');
     process.stdout.write(Buffer.concat([header, body]));

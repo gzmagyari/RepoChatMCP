@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "chat-search": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["./bin/chat-search.js"]
+    }
+  }
+}
