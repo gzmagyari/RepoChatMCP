@@ -324,6 +324,46 @@ function normalizeSummary(summary) {
   };
 }
 
+function summaryHasContent(summary) {
+  const normalized = normalizeSummary(summary);
+  if (normalized.repositoryOverview) return true;
+
+  return [
+    normalized.architectureServices,
+    normalized.importantUrlsPorts,
+    normalized.repoStructure,
+    normalized.implementedWork,
+    normalized.rulesConstraints,
+    normalized.currentState,
+    normalized.openIssuesNextSteps,
+  ].some((items) => items.length > 0);
+}
+
+function mergeUniqueItems(...groups) {
+  return [...new Set(groups.flat().map((item) => `${item}`.trim()).filter(Boolean))];
+}
+
+function mergeSummariesDeterministically(summaries) {
+  const normalized = summaries.map((summary) => normalizeSummary(summary)).filter(summaryHasContent);
+  if (normalized.length === 0) {
+    return normalizeSummary({});
+  }
+
+  return {
+    repositoryOverview: normalized
+      .map((summary) => summary.repositoryOverview)
+      .filter(Boolean)
+      .join('\n\n'),
+    architectureServices: mergeUniqueItems(...normalized.map((summary) => summary.architectureServices)),
+    importantUrlsPorts: mergeUniqueItems(...normalized.map((summary) => summary.importantUrlsPorts)),
+    repoStructure: mergeUniqueItems(...normalized.map((summary) => summary.repoStructure)),
+    implementedWork: mergeUniqueItems(...normalized.map((summary) => summary.implementedWork)),
+    rulesConstraints: mergeUniqueItems(...normalized.map((summary) => summary.rulesConstraints)),
+    currentState: mergeUniqueItems(...normalized.map((summary) => summary.currentState)),
+    openIssuesNextSteps: mergeUniqueItems(...normalized.map((summary) => summary.openIssuesNextSteps)),
+  };
+}
+
 function renderSection(lines, heading, items) {
   if (!items || items.length === 0) return;
   lines.push(`## ${heading}`);
@@ -746,6 +786,67 @@ async function summarizeChunk(prompt, effectiveBackend, config, dependencies) {
   return invokeCodexSummary(prompt, config, dependencies);
 }
 
+async function summarizeMessagesAdaptive(
+  messages,
+  {
+    repoPath,
+    effectiveBackend,
+    config,
+    dependencies,
+    chunkIndex = 0,
+    chunkCount = 1,
+    minSplitMessages = 25,
+  },
+) {
+  const prompt = buildChunkPrompt(messages, {
+    repoPath,
+    chunkIndex,
+    chunkCount,
+  });
+  const summary = await summarizeChunk(prompt, effectiveBackend, config, dependencies);
+  if (summaryHasContent(summary)) {
+    return {
+      summaries: [normalizeSummary(summary)],
+      leafChunkCount: 1,
+      retriedForEmptySummary: false,
+    };
+  }
+
+  if (messages.length <= minSplitMessages) {
+    return {
+      summaries: [],
+      leafChunkCount: 1,
+      retriedForEmptySummary: false,
+    };
+  }
+
+  const midpoint = Math.ceil(messages.length / 2);
+  const left = await summarizeMessagesAdaptive(messages.slice(0, midpoint), {
+    repoPath,
+    effectiveBackend,
+    config,
+    dependencies,
+    chunkIndex,
+    chunkCount: chunkCount * 2,
+    minSplitMessages,
+  });
+  const right = await summarizeMessagesAdaptive(messages.slice(midpoint), {
+    repoPath,
+    effectiveBackend,
+    config,
+    dependencies,
+    chunkIndex: chunkIndex + 1,
+    chunkCount: chunkCount * 2,
+    minSplitMessages,
+  });
+
+  return {
+    summaries: [...left.summaries, ...right.summaries],
+    leafChunkCount: left.leafChunkCount + right.leafChunkCount,
+    retriedForEmptySummary: true,
+  };
+}
+
 async function mapWithConcurrency(items, concurrency, mapper) {
   const results = new Array(items.length);
   let nextIndex = 0;
@@ -767,13 +868,13 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return results;
 }
 
-function buildRunSummaryMetadata(messages, chunks, effectiveBackend, createdAt, runId) {
+function buildRunSummaryMetadata(messages, chunkCount, effectiveBackend, createdAt, runId) {
   return {
     runId,
     createdAt,
     backend: effectiveBackend.backend,
     messageCount: messages.length,
-    chunkCount: chunks.length,
+    chunkCount,
   };
 }
 
@@ -829,6 +930,9 @@ function activeRunsForOutput(config, manifest, provider) {
       createdAt: run.createdAt,
       backend: run.backend,
       provider: run.provider,
+      providersIndexed: Array.isArray(run.providersIndexed) ? run.providersIndexed : null,
+      sessionCountsByProvider: run.sessionCountsByProvider || null,
+      messageCountsByProvider: run.messageCountsByProvider || null,
       messageCount: run.messageCount,
       firstMessageTs: run.firstMessageTs || null,
       lastMessageTs: run.lastMessageTs || null,
@@ -836,6 +940,7 @@ function activeRunsForOutput(config, manifest, provider) {
       inputChars: run.inputChars || null,
       outputChars: run.outputChars || null,
       model: run.model || null,
+      retriedForEmptySummary: run.retriedForEmptySummary || false,
       filePath: join(getKnowledgeRoot(config), run.filePath),
     }));
 }
@@ -865,6 +970,22 @@ function summarizeCompactionEntries(entries) {
     score: entry.score,
     textChars: (entry.text || '').length,
   }));
+}
+
+function countSessionsByProvider(sessions) {
+  const counts = {};
+  for (const session of sessions) {
+    counts[session.provider] = (counts[session.provider] || 0) + 1;
+  }
+  return counts;
+}
+
+function countMessagesByProvider(messages) {
+  const counts = {};
+  for (const message of messages) {
+    counts[message.provider] = (counts[message.provider] || 0) + 1;
+  }
+  return counts;
 }
 
 function ensureKnowledgeSnapshotText(title, body, emptyMessage) {
@@ -992,15 +1113,17 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
     };
   }
 
-  const gitignorePath = ensureKnowledgeGitignore(config);
-
   const provider = params.provider || null;
   const force = params.force === true;
   const messages = flattenMessages(sessions, { provider });
+  const sessionCountsByProvider = countSessionsByProvider(sessions);
+  const messageCountsByProvider = countMessagesByProvider(messages);
+  const providersIndexed = Object.keys(messageCountsByProvider).sort();
   const manifest = loadKnowledgeManifest(config);
   const { pendingMessages, invalidRunIds } = collectPendingMessages(messages, manifest, force);
 
   if (pendingMessages.length === 0) {
+    const gitignorePath = ensureKnowledgeGitignore(config);
     return {
       status: 'skipped',
       backend: config.knowledge.backend,
@@ -1008,12 +1131,17 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
       newMessages: 0,
       pendingMessages: 0,
       filesWritten: 0,
+      providerFilter: provider,
+      providersIndexed,
+      sessionCountsByProvider,
+      messageCountsByProvider,
       gitignorePath,
       message: 'No new messages to index.',
     };
   }
 
   if (pendingMessages.length < MIN_INDEXABLE_MESSAGES) {
+    const gitignorePath = ensureKnowledgeGitignore(config);
     return {
       status: 'skipped',
       backend: config.knowledge.backend,
@@ -1021,44 +1149,75 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
       newMessages: 0,
       pendingMessages: pendingMessages.length,
       filesWritten: 0,
+      providerFilter: provider,
+      providersIndexed,
+      sessionCountsByProvider,
+      messageCountsByProvider,
       gitignorePath,
       message: `Need at least ${MIN_INDEXABLE_MESSAGES} new messages before indexing.`,
     };
   }
 
   const effectiveBackend = await resolveEffectiveBackend(config, dependencies);
+  const gitignorePath = ensureKnowledgeGitignore(config);
   const maxChars = Math.max(1, config.knowledge?.maxChars || 500000);
   const chunks = splitMessagesByChars(pendingMessages, maxChars);
-  const chunkPrompts = chunks.map((chunk, index) =>
-    buildChunkPrompt(chunk, {
-      repoPath: config.repoPath,
-      chunkIndex: index,
-      chunkCount: chunks.length,
-    }),
-  );
-
-  let chunkSummaries;
+  let chunkResults;
   if (effectiveBackend.backend === 'http') {
-    chunkSummaries = await mapWithConcurrency(
-      chunkPrompts,
+    chunkResults = await mapWithConcurrency(
+      chunks,
       Math.max(1, config.knowledge?.httpConcurrency || 3),
-      async (prompt) => summarizeChunk(prompt, effectiveBackend, config, dependencies),
+      async (chunk, index) =>
+        summarizeMessagesAdaptive(chunk, {
+          repoPath: config.repoPath,
+          effectiveBackend,
+          config,
+          dependencies,
+          chunkIndex: index,
+          chunkCount: chunks.length,
+        }),
     );
   } else {
-    chunkSummaries = [];
-    for (const prompt of chunkPrompts) {
-      chunkSummaries.push(await summarizeChunk(prompt, effectiveBackend, config, dependencies));
+    chunkResults = [];
+    for (let index = 0; index < chunks.length; index++) {
+      chunkResults.push(
+        await summarizeMessagesAdaptive(chunks[index], {
+          repoPath: config.repoPath,
+          effectiveBackend,
+          config,
+          dependencies,
+          chunkIndex: index,
+          chunkCount: chunks.length,
+        }),
+      );
     }
+  }
+
+  const chunkSummaries = chunkResults.flatMap((result) => result.summaries).filter(summaryHasContent);
+  const effectiveChunkCount = chunkResults.reduce((sum, result) => sum + result.leafChunkCount, 0);
+  const retriedForEmptySummary = chunkResults.some((result) => result.retriedForEmptySummary);
+
+  if (chunkSummaries.length === 0) {
+    throw new Error(
+      'Knowledge indexing produced no usable summary content. Try a stronger model or reduce CHAT_SEARCH_KNOWLEDGE_MAX_CHARS.',
+    );
   }
 
   let finalSummary = chunkSummaries[0];
   if (chunkSummaries.length > 1) {
-    finalSummary = await summarizeChunk(
-      buildMergePrompt(chunkSummaries, { repoPath: config.repoPath }),
-      effectiveBackend,
-      config,
-      dependencies,
-    );
+    try {
+      finalSummary = await summarizeChunk(
+        buildMergePrompt(chunkSummaries, { repoPath: config.repoPath }),
+        effectiveBackend,
+        config,
+        dependencies,
+      );
+      if (!summaryHasContent(finalSummary)) {
+        finalSummary = mergeSummariesDeterministically(chunkSummaries);
+      }
+    } catch {
+      finalSummary = mergeSummariesDeterministically(chunkSummaries);
+    }
   }
 
   const createdAt = (dependencies.now || nowIso)();
@@ -1067,7 +1226,7 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
   const absolutePath = join(getKnowledgeRoot(config), relativePath);
   const markdown = renderKnowledgeSummary(
     finalSummary,
-    buildRunSummaryMetadata(pendingMessages, chunks, effectiveBackend, createdAt, runId),
+    buildRunSummaryMetadata(pendingMessages, effectiveChunkCount, effectiveBackend, createdAt, runId),
   );
 
   mkdirSync(getKnowledgeRunsDir(config), { recursive: true });
@@ -1092,16 +1251,20 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
     createdAt,
     backend: effectiveBackend.backend,
     provider,
+    providersIndexed,
+    sessionCountsByProvider,
+    messageCountsByProvider,
     messageCount: pendingMessages.length,
     firstMessageTs: pendingMessages[0]?.timestamp || null,
     lastMessageTs: pendingMessages[pendingMessages.length - 1]?.timestamp || null,
     messageIds: pendingMessages.map((message) => getMessageCacheKey(message)),
     filePath: relativePath,
-    chunkCount: chunks.length,
+    chunkCount: effectiveChunkCount,
     inputChars: serializeTranscript(pendingMessages).length,
     outputChars: markdown.length,
     configFingerprint: configFingerprint(config),
     model: config.knowledge?.model || null,
+    retriedForEmptySummary,
   };
 
   nextManifest.configFingerprint = configFingerprint(config);
@@ -1135,7 +1298,12 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
     newMessages: pendingMessages.length,
     pendingMessages: 0,
     filesWritten: 1,
-    chunkCount: chunks.length,
+    chunkCount: effectiveChunkCount,
+    providerFilter: provider,
+    providersIndexed,
+    sessionCountsByProvider,
+    messageCountsByProvider,
+    retriedForEmptySummary,
     filePath: absolutePath,
     gitignorePath,
     runId,
@@ -1153,9 +1321,11 @@ export const __private = {
   invokeCodexSummary,
   invokeHttpSummary,
   isOpenRouterBaseUrl,
+  mergeSummariesDeterministically,
   parseJsonResponse,
   parseProviderPinnedModel,
   resolveEffectiveBackend,
   runCommandCapture,
+  summaryHasContent,
   tailLines,
 };

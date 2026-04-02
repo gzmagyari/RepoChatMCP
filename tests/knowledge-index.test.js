@@ -424,11 +424,44 @@ test('knowledge index: writes one persisted run when all pending messages fit in
     assert.equal(result.chunkCount, 1);
     assert.equal(result.filesWritten, 1);
     assert.equal(calls, 1);
+    assert.deepEqual(result.providersIndexed, ['claude']);
+    assert.deepEqual(result.sessionCountsByProvider, { claude: 1 });
+    assert.deepEqual(result.messageCountsByProvider, { claude: 120 });
     assert.equal(manifest.runs.length, 1);
     assert.equal(Object.keys(manifest.indexedMessages).length, 120);
     assert.ok(fs.existsSync(result.filePath));
     assert.equal(result.gitignorePath, path.join(repoPath, '.gitignore'));
     assert.match(fs.readFileSync(result.gitignorePath, 'utf8'), /\.repochatmcp\//);
+  }));
+
+test('knowledge index: retries smaller HTTP chunks when a large summary comes back empty', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxChars: 500000,
+    });
+    const session = makeSession({ count: 120, textSize: 150 });
+    let calls = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async (prompt) => {
+        calls++;
+        if (!prompt.includes('Partial summaries JSON:') && prompt.includes('Chunk: 1 of 1')) {
+          return {};
+        }
+        return summaryFor(`retry-${calls}`);
+      },
+    });
+
+    const storedText = fs.readFileSync(result.filePath, 'utf8');
+
+    assert.equal(result.status, 'indexed');
+    assert.equal(result.retriedForEmptySummary, true);
+    assert.ok(result.chunkCount > 1);
+    assert.ok(calls >= 3);
+    assert.match(storedText, /Overview retry-/);
   }));
 
 test('knowledge index: creates .gitignore automatically when missing', async () =>
@@ -511,6 +544,60 @@ test('knowledge index: splits oversized input and merges it into one persisted r
     assert.equal(manifest.runs.length, 1);
     assert.match(storedText, /Overview merged/);
     assert.ok(chunkCalls >= 2);
+  }));
+
+test('knowledge index: falls back to deterministic merge when merge summary is empty', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxChars: 3500,
+    });
+    const session = makeSession({ count: 120, textSize: 260 });
+    let mergeCalls = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async (prompt) => {
+        if (prompt.includes('Partial summaries JSON:')) {
+          mergeCalls++;
+          return {};
+        }
+        return summaryFor(`chunk-${mergeCalls + 1}`);
+      },
+    });
+
+    const storedText = fs.readFileSync(result.filePath, 'utf8');
+
+    assert.equal(result.status, 'indexed');
+    assert.equal(mergeCalls, 1);
+    assert.match(storedText, /Overview chunk-1/);
+    assert.match(storedText, /Architecture chunk-1/);
+  }));
+
+test('knowledge index: returns real provider composition when indexing multiple providers', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxChars: 500000,
+    });
+    const claude = makeSession({ provider: 'claude', sessionId: 'claude-1', count: 120, textSize: 40 });
+    const codex = makeSession({ provider: 'codex', sessionId: 'codex-1', count: 120, textSize: 40 });
+
+    const result = await runKnowledgeIndex([claude, codex], config, {}, {
+      invokeHttpSummary: async () => summaryFor('mixed-providers'),
+    });
+
+    const manifest = loadKnowledgeManifest(config);
+
+    assert.deepEqual(result.providersIndexed, ['claude', 'codex']);
+    assert.deepEqual(result.sessionCountsByProvider, { claude: 1, codex: 1 });
+    assert.deepEqual(result.messageCountsByProvider, { claude: 120, codex: 120 });
+    assert.deepEqual(manifest.runs[0].providersIndexed, ['claude', 'codex']);
+    assert.deepEqual(manifest.runs[0].sessionCountsByProvider, { claude: 1, codex: 1 });
+    assert.deepEqual(manifest.runs[0].messageCountsByProvider, { claude: 120, codex: 120 });
   }));
 
 test('knowledge index: codex chunk execution is strictly sequential', async () =>

@@ -6,6 +6,7 @@ import { searchMessages, grepMessages, readSession, readLines } from '../search.
 import {
   buildBaseKnowledgeResponse,
   buildCompactionKnowledgeResponse,
+  flattenMessages,
   runKnowledgeIndex,
 } from '../knowledge-index.js';
 
@@ -17,7 +18,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
 
 export const SERVER_INFO = {
   name: 'chat-search',
-  version: '0.1.7',
+  version: '0.1.8',
 };
 
 export function negotiateProtocolVersion(requestedVersion) {
@@ -94,6 +95,40 @@ function loadSessions(sessionFiles, cache) {
     sessions.push(session);
   }
   return sessions;
+}
+
+function countByProvider(items) {
+  const counts = {};
+  for (const item of items) {
+    const provider = item?.provider;
+    if (!provider) continue;
+    counts[provider] = (counts[provider] || 0) + 1;
+  }
+  return counts;
+}
+
+function buildKnowledgeIndexToolError(err, sessions, params, config) {
+  const providerFilter = params.provider || null;
+  const messages = flattenMessages(sessions, { provider: providerFilter });
+  const providersIndexed = [...new Set(messages.map((message) => message.provider).filter(Boolean))].sort();
+
+  return {
+    status: 'error',
+    backend: config.knowledge?.backend || 'off',
+    providerFilter,
+    providersIndexed,
+    sessionCountsByProvider: countByProvider(sessions),
+    messageCountsByProvider: countByProvider(messages),
+    messagesSeen: messages.length,
+    newMessages: 0,
+    pendingMessages: messages.length,
+    filesWritten: 0,
+    message: `Knowledge indexing failed: ${err.message}`,
+    error: {
+      type: err?.name || 'Error',
+      message: err?.message || 'Unknown knowledge indexing error.',
+    },
+  };
 }
 
 /**
@@ -205,7 +240,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        provider: { type: 'string', description: 'Optional provider filter: claude or codex' },
+        provider: { type: 'string', description: 'Optional narrowing filter: claude or codex. Omit to index both providers.' },
         force: { type: 'boolean', description: 'Force a full rebuild of the persisted knowledge index' },
       },
     },
@@ -318,10 +353,14 @@ export function createMcpRequestHandler(config) {
 
       case 'chat.knowledge_index': {
         const sessions = getSessions(params.provider);
-        return await runKnowledgeIndex(sessions, config, {
-          provider: params.provider,
-          force: params.force === true,
-        });
+        try {
+          return await runKnowledgeIndex(sessions, config, {
+            provider: params.provider,
+            force: params.force === true,
+          });
+        } catch (err) {
+          return buildKnowledgeIndexToolError(err, sessions, params, config);
+        }
       }
 
       default:

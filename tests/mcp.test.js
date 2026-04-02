@@ -127,7 +127,7 @@ function sendFramedRpc(proc, message) {
 /**
  * Spawn the MCP server process.
  */
-function spawnMcp(fixtures) {
+function spawnMcp(fixtures, envOverrides = {}) {
   const args = [
     binScript,
     '--repo', '/tmp/test-repo',
@@ -137,7 +137,7 @@ function spawnMcp(fixtures) {
 
   const proc = spawn(process.execPath, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
+    env: { ...process.env, ...envOverrides },
   });
 
   return proc;
@@ -348,6 +348,66 @@ test('MCP: knowledge tools return disabled indexing state by default', async () 
     assert.equal(indexData.status, 'disabled');
     assert.ok(Array.isArray(compactionData.compactionEntries));
     assert.ok(path.isAbsolute(compactionData.compactionsFilePath));
+  } finally {
+    proc.kill();
+    fixtures.cleanup();
+  }
+});
+
+test('MCP: chat.knowledge_index returns structured error details when indexing fails', async () => {
+  const fixtures = setupTempFixtures();
+  const claudeSessionPath = path.join(
+    fixtures.claudeRoot,
+    '-tmp-test-repo',
+    'claude-test-session.jsonl',
+  );
+  const originalContent = fs.readFileSync(claudeSessionPath, 'utf8').trim();
+  fs.writeFileSync(
+    claudeSessionPath,
+    Array.from({ length: 20 }, () => originalContent).join('\n') + '\n',
+    'utf8',
+  );
+  const proc = spawnMcp(fixtures, {
+    CHAT_SEARCH_KNOWLEDGE_BACKEND: 'http',
+    CHAT_SEARCH_KNOWLEDGE_API_KEY: '',
+    CHAT_SEARCH_KNOWLEDGE_MODEL: '',
+  });
+
+  try {
+    await sendRpc(proc, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'test', version: '1.0.0' },
+      },
+    });
+
+    const response = await sendRpc(proc, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'chat.knowledge_index',
+        arguments: {},
+      },
+    });
+
+    assert.equal(response.id, 2);
+    assert.equal(response.result.isError, false);
+
+    const data = JSON.parse(response.result.content[0].text);
+    assert.equal(data.status, 'error');
+    assert.equal(data.backend, 'http');
+    assert.equal(data.providerFilter, null);
+    assert.deepEqual(data.providersIndexed, ['claude']);
+    assert.deepEqual(data.sessionCountsByProvider, { claude: 1 });
+    assert.ok(typeof data.message === 'string');
+    assert.match(data.message, /requires CHAT_SEARCH_KNOWLEDGE_API_KEY and CHAT_SEARCH_KNOWLEDGE_MODEL/i);
+    assert.equal(data.error.type, 'Error');
+    assert.match(data.error.message, /requires CHAT_SEARCH_KNOWLEDGE_API_KEY and CHAT_SEARCH_KNOWLEDGE_MODEL/i);
   } finally {
     proc.kill();
     fixtures.cleanup();
