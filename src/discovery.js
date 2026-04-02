@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, statSync } from 'fs';
+import { readdirSync, existsSync, statSync, realpathSync } from 'fs';
 import { join, basename } from 'path';
 import { normalizeRepoPath, readJsonLines } from './utils.js';
 
@@ -20,11 +20,34 @@ function encodeClaudeProjectDir(repoPath) {
 }
 
 /**
+ * Canonicalize a path for deduplication.
+ * On Windows, lowercase because the filesystem is typically case-insensitive.
+ */
+function canonicalizePath(filePath) {
+  let canonical = filePath;
+  try {
+    canonical = realpathSync.native ? realpathSync.native(filePath) : realpathSync(filePath);
+  } catch {
+    // Fall back to the input path if realpath fails.
+  }
+
+  canonical = canonical.replace(/\\/g, '/');
+  if (process.platform === 'win32') {
+    canonical = canonical.toLowerCase();
+  }
+  if (canonical.length > 1 && canonical.endsWith('/')) {
+    canonical = canonical.slice(0, -1);
+  }
+  return canonical;
+}
+
+/**
  * Discover Claude Code session files for the given repo.
  */
 function discoverClaudeSessions(config) {
   const results = [];
   const claudeRoot = config.claudeRoot;
+  const scannedProjectDirs = new Set();
 
   if (!existsSync(claudeRoot)) return results;
 
@@ -59,6 +82,10 @@ function discoverClaudeSessions(config) {
       continue;
     }
 
+    const projectDirKey = canonicalizePath(projectDir);
+    if (scannedProjectDirs.has(projectDirKey)) continue;
+    scannedProjectDirs.add(projectDirKey);
+
     try {
       const files = readdirSync(projectDir);
       for (const file of files) {
@@ -74,8 +101,9 @@ function discoverClaudeSessions(config) {
   // Deduplicate by filePath
   const seen = new Set();
   return results.filter((r) => {
-    if (seen.has(r.filePath)) return false;
-    seen.add(r.filePath);
+    const key = canonicalizePath(r.filePath);
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 }
