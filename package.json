@@ -1,0 +1,17 @@
+{
+  "name": "chat-search",
+  "version": "0.1.0",
+  "description": "MCP server for searching Claude Code and Codex chat session histories.",
+  "type": "module",
+  "bin": {
+    "chat-search": "./bin/chat-search.js"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "start": "node ./bin/chat-search.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT"
+}
