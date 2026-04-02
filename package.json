@@ -1,15 +1,39 @@
 {
-  "name": "chat-search",
-  "version": "0.1.0",
-  "description": "MCP server for searching Claude Code and Codex chat session histories.",
+  "name": "chat-search-mcp",
+  "version": "0.1.2",
+  "description": "MCP server for searching Claude Code and Codex CLI chat session histories.",
   "type": "module",
   "bin": {
-    "chat-search": "./bin/chat-search.js"
+    "chat-search-mcp": "bin/chat-search.js",
+    "chat-search": "bin/chat-search.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
   "scripts": {
     "test": "node --test tests/*.test.js",
     "start": "node ./bin/chat-search.js"
   },
+  "keywords": [
+    "mcp",
+    "claude",
+    "codex",
+    "chat",
+    "search",
+    "model-context-protocol",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gzmagyari/RepoChatMCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gzmagyari/RepoChatMCP/issues"
+  },
+  "homepage": "https://github.com/gzmagyari/RepoChatMCP#readme",
+  "author": "gzmagyari",
   "engines": {
     "node": ">=22.0.0"
   },

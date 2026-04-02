@@ -141,6 +141,40 @@ If you cloned this repo directly, that relative path is enough. Claude Code runs
 
 If you want to point at a different checkout instead of the current repo, use an absolute path or pass `--repo`.
 
+## Use the published npm package
+
+For a user-scoped or local-scoped MCP installed from npm, use the published package instead of the repo checkout.
+
+macOS / Linux:
+
+```json
+{
+  "mcpServers": {
+    "chat-search": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "chat-search-mcp@latest", "mcp"]
+    }
+  }
+}
+```
+
+Windows:
+
+```json
+{
+  "mcpServers": {
+    "chat-search": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "chat-search-mcp@latest", "mcp"]
+    }
+  }
+}
+```
+
+On native Windows, Claude Code cannot directly execute `npx` for local stdio MCP servers. If you use `command: "npx"` there, Claude will typically show `MCP error -32000: Connection closed`.
+
 ## Use as an MCP in Codex
 
 Add to `~/.codex/config.toml`:
