@@ -3,7 +3,11 @@ import { StdioJsonRpcServer } from './framing.js';
 import { discoverSessionFiles } from '../discovery.js';
 import { normalizeSession } from '../normalizer.js';
 import { searchMessages, grepMessages, readSession, readLines } from '../search.js';
-import { buildBaseKnowledgeResponse, runKnowledgeIndex } from '../knowledge-index.js';
+import {
+  buildBaseKnowledgeResponse,
+  buildCompactionKnowledgeResponse,
+  runKnowledgeIndex,
+} from '../knowledge-index.js';
 
 export const SUPPORTED_PROTOCOL_VERSIONS = [
   '2025-06-18',
@@ -175,14 +179,23 @@ const TOOLS = [
   },
   {
     name: 'chat.base_knowledge',
-    description: 'Collect repository knowledge metadata and return absolute file paths for live and persisted knowledge snapshots.',
+    description: 'Collect persisted repository knowledge metadata and return absolute file paths for indexed knowledge snapshots.',
     inputSchema: {
       type: 'object',
       properties: {
-        limit: { type: 'number', description: 'Max entries (default 20)' },
-        query: { type: 'string', description: 'Optional query to boost relevant entries' },
         provider: { type: 'string', description: 'Filter by provider: claude or codex' },
-        writeToFile: { type: 'boolean', description: 'Deprecated. A combined snapshot file path is returned automatically.' },
+      },
+    },
+  },
+  {
+    name: 'chat.compaction_knowledge',
+    description: 'Collect live compaction knowledge metadata and return an absolute file path for the compaction snapshot.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        provider: { type: 'string', description: 'Filter by provider: claude or codex' },
+        limit: { type: 'number', description: 'Max entries (default 20)' },
+        query: { type: 'string', description: 'Optional query to boost relevant compactions' },
       },
     },
   },
@@ -290,10 +303,16 @@ export function createMcpRequestHandler(config) {
       case 'chat.base_knowledge': {
         const sessions = getSessions(params.provider);
         return buildBaseKnowledgeResponse(sessions, config, {
+          provider: params.provider,
+        });
+      }
+
+      case 'chat.compaction_knowledge': {
+        const sessions = getSessions(params.provider);
+        return buildCompactionKnowledgeResponse(sessions, config, {
           limit: params.limit ?? 20,
           query: params.query,
           provider: params.provider,
-          writeToFile: params.writeToFile === true,
         });
       }
 

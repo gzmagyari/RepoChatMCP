@@ -2,8 +2,13 @@
   "mcpServers": {
     "chat-search": {
       "type": "stdio",
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "chat-search-mcp@0.1.6", "mcp"]
+      "command": "node",
+      "args": ["./bin/chat-search.js"],
+      "env": {
+        "CHAT_SEARCH_KNOWLEDGE_BACKEND": "http",
+        "CHAT_SEARCH_KNOWLEDGE_API_KEY": "your-api-key-here",
+        "CHAT_SEARCH_KNOWLEDGE_MODEL": "gpt-4.1-nano"
+      }
     }
   }
 }

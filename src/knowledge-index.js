@@ -9,7 +9,11 @@ import {
 } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { collectBaseKnowledge, renderHeuristicKnowledge, writeKnowledgeTextToFile } from './knowledge.js';
+import {
+  collectCompactionKnowledge,
+  renderCompactionKnowledge,
+  writeKnowledgeTextToFile,
+} from './knowledge.js';
 import { clip, normalizeRepoPath, nowIso, sha1 } from './utils.js';
 
 export const KNOWLEDGE_DISABLED_MESSAGE =
@@ -532,6 +536,31 @@ function getHttpEndpoint(baseUrl) {
   return root.endsWith('/chat/completions') ? root : `${root}/chat/completions`;
 }
 
+function isOpenRouterBaseUrl(baseUrl) {
+  try {
+    const resolved = new URL(baseUrl || 'https://api.openai.com/v1');
+    return resolved.hostname === 'openrouter.ai' || resolved.hostname.endsWith('.openrouter.ai');
+  } catch {
+    return false;
+  }
+}
+
+function parseProviderPinnedModel(model) {
+  const value = `${model || ''}`.trim();
+  const separator = value.lastIndexOf('@');
+  if (separator <= 0 || separator === value.length - 1) {
+    return {
+      baseModel: value,
+      provider: null,
+    };
+  }
+
+  return {
+    baseModel: value.slice(0, separator),
+    provider: value.slice(separator + 1),
+  };
+}
+
 async function invokeHttpSummary(prompt, config, dependencies = {}) {
   const fetchImpl = dependencies.fetch || globalThis.fetch;
   if (!fetchImpl) {
@@ -539,33 +568,50 @@ async function invokeHttpSummary(prompt, config, dependencies = {}) {
   }
 
   const endpoint = getHttpEndpoint(config.knowledge.baseUrl);
+  const { baseModel, provider } = parseProviderPinnedModel(config.knowledge.model);
+  if (provider && !isOpenRouterBaseUrl(config.knowledge.baseUrl)) {
+    throw new Error(
+      'OpenRouter provider pinning via "@provider" requires CHAT_SEARCH_KNOWLEDGE_BASE_URL to point to OpenRouter.',
+    );
+  }
+
   const timeoutMs = config.knowledge.timeoutMs || 120000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const requestBody = {
+      model: baseModel,
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You extract durable repository knowledge from coding chat logs. Return JSON only and keep it concise.',
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      response_format: { type: 'json_object' },
+    };
+
+    if (provider) {
+      requestBody.provider = {
+        order: [provider],
+        allow_fallbacks: false,
+        require_parameters: true,
+      };
+    }
+
     const response = await fetchImpl(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.knowledge.apiKey}`,
       },
-      body: JSON.stringify({
-        model: config.knowledge.model,
-        temperature: 0.1,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You extract durable repository knowledge from coding chat logs. Return JSON only and keep it concise.',
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      }),
+      body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
 
@@ -809,7 +855,7 @@ function tailLines(text, maxLines) {
   };
 }
 
-function summarizeHeuristicEntries(entries) {
+function summarizeCompactionEntries(entries) {
   return entries.map((entry) => ({
     provider: entry.provider,
     sessionId: entry.sessionId,
@@ -832,7 +878,6 @@ function buildCombinedKnowledgeSnapshot({
   indexing,
   indexedRuns,
   indexedKnowledgeText,
-  heuristicsText,
 }) {
   const parts = [
     '# Base Knowledge Snapshot',
@@ -851,22 +896,12 @@ function buildCombinedKnowledgeSnapshot({
     '',
     indexedKnowledgeText.trim() || 'No persisted indexed knowledge files were found.',
     '',
-    '## Live Heuristic Knowledge',
-    '',
-    heuristicsText.trim() || 'No live heuristic knowledge entries were found.',
-    '',
   ];
 
   return `${parts.join('\n').trim()}\n`;
 }
 
 export function buildBaseKnowledgeResponse(sessions, config, params = {}) {
-  const heuristicEntries = collectBaseKnowledge(sessions, {
-    limit: params.limit ?? 20,
-    query: params.query,
-    provider: params.provider,
-  });
-  const heuristicsText = renderHeuristicKnowledge(heuristicEntries);
   const manifest = loadKnowledgeManifest(config);
   const indexedRuns = activeRunsForOutput(config, manifest, params.provider);
   const indexedKnowledgeText = indexedRuns
@@ -893,38 +928,54 @@ export function buildBaseKnowledgeResponse(sessions, config, params = {}) {
       `Knowledge indexing is disabled for new indexing, but loaded ${indexedRuns.length} persisted knowledge run(s).`;
   }
 
-  const heuristicsFilePath = writeKnowledgeTextToFile(
-    ensureKnowledgeSnapshotText(
-      'Live Heuristic Knowledge',
-      heuristicsText,
-      'No live heuristic knowledge entries were found.',
-    ),
-  );
   const combinedKnowledgeText = buildCombinedKnowledgeSnapshot({
     config,
     indexing,
     indexedRuns,
     indexedKnowledgeText,
-    heuristicsText,
   });
   const combinedKnowledgeFilePath = writeKnowledgeTextToFile(combinedKnowledgeText);
   const tailed = tailLines(combinedKnowledgeText, MAX_COMBINED_KNOWLEDGE_LINES);
 
   const response = {
-    heuristicEntries: summarizeHeuristicEntries(heuristicEntries),
     indexing,
     indexedRuns,
     indexedKnowledgeFilePaths: indexedRuns.map((run) => run.filePath),
-    heuristicsFilePath,
     combinedKnowledgeFilePath,
     combinedPreviewLineCount: tailed.text ? tailed.text.split('\n').length : 0,
     truncated: tailed.truncated,
     message:
-      'Knowledge content is stored in files. Read combinedKnowledgeFilePath first, then inspect indexedRuns[].filePath for persisted summaries and heuristicsFilePath for the live heuristic snapshot.',
+      'Knowledge content is stored in files. Read combinedKnowledgeFilePath first, then inspect indexedRuns[].filePath for the persisted summaries.',
   };
 
   response.filePath = combinedKnowledgeFilePath;
 
+  return response;
+}
+
+export function buildCompactionKnowledgeResponse(sessions, config, params = {}) {
+  const compactionEntries = collectCompactionKnowledge(sessions, {
+    limit: params.limit ?? 20,
+    query: params.query,
+    provider: params.provider,
+  });
+  const compactionsText = renderCompactionKnowledge(compactionEntries);
+  const compactionsFilePath = writeKnowledgeTextToFile(
+    ensureKnowledgeSnapshotText(
+      'Live Compaction Knowledge',
+      compactionsText,
+      'No live compaction knowledge entries were found.',
+    ),
+  );
+
+  const response = {
+    compactionEntries: summarizeCompactionEntries(compactionEntries),
+    compactionsFilePath,
+    message:
+      'Compaction knowledge is stored in a file. Read compactionsFilePath first.',
+  };
+
+  response.filePath = compactionsFilePath;
   return response;
 }
 
@@ -1101,7 +1152,9 @@ export const __private = {
   configFingerprint,
   invokeCodexSummary,
   invokeHttpSummary,
+  isOpenRouterBaseUrl,
   parseJsonResponse,
+  parseProviderPinnedModel,
   resolveEffectiveBackend,
   runCommandCapture,
   tailLines,

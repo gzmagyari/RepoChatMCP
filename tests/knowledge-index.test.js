@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   KNOWLEDGE_DISABLED_MESSAGE,
+  __private,
   buildBaseKnowledgeResponse,
+  buildCompactionKnowledgeResponse,
   loadKnowledgeManifest,
   runKnowledgeIndex,
 } from '../src/knowledge-index.js';
@@ -84,6 +86,49 @@ function makeSession({
   };
 }
 
+function makeCompactionSession({
+  provider = 'codex',
+  sessionId = `${provider}-compaction-session`,
+  count = 4,
+} = {}) {
+  const messages = [];
+
+  for (let index = 0; index < count; index++) {
+    messages.push({
+      provider,
+      sessionId,
+      index,
+      timestamp: isoAt(index),
+      type: 'compaction',
+      role: 'system',
+      text: `Summary of session ${index} with database, auth, and current state details.`,
+      metadata: {},
+    });
+  }
+
+  messages.push({
+    provider,
+    sessionId,
+    index: count,
+    timestamp: isoAt(count),
+    type: 'assistant',
+    role: 'assistant',
+    text: `Long assistant fallback ${'detail '.repeat(60)}`,
+    metadata: {},
+  });
+
+  return {
+    provider,
+    sessionId,
+    cwd: '/tmp/test-repo',
+    gitBranch: 'main',
+    startedAt: messages[0]?.timestamp || null,
+    endedAt: messages[messages.length - 1]?.timestamp || null,
+    messageCount: messages.length,
+    messages,
+  };
+}
+
 function summaryFor(label, extraLines = 0) {
   return {
     repositoryOverview: `Overview ${label}`,
@@ -111,22 +156,23 @@ test('knowledge index: disabled mode returns configuration-required response', a
     assert.match(result.message, /disabled/i);
   }));
 
-test('base knowledge: disabled mode stays heuristics-only', () =>
+test('base knowledge: disabled mode returns persisted-only response', () =>
   withTempRepo((repoPath) => {
     const config = makeConfig(repoPath, { backend: 'off' });
     const session = makeSession({ count: 20 });
 
-    const result = buildBaseKnowledgeResponse([session], config, { limit: 5 });
+    const result = buildBaseKnowledgeResponse([session], config, {});
+    const combinedText = fs.readFileSync(result.combinedKnowledgeFilePath, 'utf8');
 
     assert.equal(result.indexing.enabled, false);
     assert.equal(result.indexing.message, KNOWLEDGE_DISABLED_MESSAGE);
     assert.equal(result.indexedRuns.length, 0);
-    assert.ok(result.heuristicEntries.length > 0);
-    assert.ok(path.isAbsolute(result.heuristicsFilePath));
     assert.ok(path.isAbsolute(result.combinedKnowledgeFilePath));
-    assert.equal(fs.existsSync(result.heuristicsFilePath), true);
     assert.equal(fs.existsSync(result.combinedKnowledgeFilePath), true);
     assert.equal(result.filePath, result.combinedKnowledgeFilePath);
+    assert.equal('heuristicEntries' in result, false);
+    assert.equal('heuristicsFilePath' in result, false);
+    assert.match(combinedText, /No persisted indexed knowledge files were found/);
   }));
 
 test('base knowledge: disabled mode still loads persisted knowledge runs from the manifest', () =>
@@ -165,7 +211,7 @@ test('base knowledge: disabled mode still loads persisted knowledge runs from th
       'utf8',
     );
 
-    const result = buildBaseKnowledgeResponse([makeSession({ count: 10 })], config, { limit: 3 });
+    const result = buildBaseKnowledgeResponse([makeSession({ count: 10 })], config, {});
     const combinedText = fs.readFileSync(result.combinedKnowledgeFilePath, 'utf8');
 
     assert.equal(result.indexing.enabled, false);
@@ -173,6 +219,162 @@ test('base knowledge: disabled mode still loads persisted knowledge runs from th
     assert.deepEqual(result.indexedKnowledgeFilePaths, [absolutePath]);
     assert.match(result.indexing.message, /loaded 1 persisted knowledge run/i);
     assert.match(combinedText, /Persisted disabled-mode knowledge/);
+    assert.doesNotMatch(combinedText, /Live Heuristic Knowledge/);
+  }));
+
+test('compaction knowledge: returns only compaction entries and a readable file', () =>
+  withTempRepo((repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'off' });
+    const result = buildCompactionKnowledgeResponse(
+      [makeCompactionSession(), makeSession({ count: 12 })],
+      config,
+      { limit: 10 },
+    );
+    const content = fs.readFileSync(result.compactionsFilePath, 'utf8');
+
+    assert.ok(Array.isArray(result.compactionEntries));
+    assert.ok(result.compactionEntries.length > 0);
+    assert.ok(result.compactionEntries.every((entry) => entry.type === 'compaction'));
+    assert.ok(path.isAbsolute(result.compactionsFilePath));
+    assert.equal(result.filePath, result.compactionsFilePath);
+    assert.match(result.message, /compactionsFilePath/);
+    assert.match(content, /# Live Compaction Knowledge/);
+    assert.doesNotMatch(content, /Long assistant fallback/);
+  }));
+
+test('compaction knowledge: returns a valid empty response when no compactions exist', () =>
+  withTempRepo((repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'off' });
+    const result = buildCompactionKnowledgeResponse([makeSession({ count: 12 })], config, {});
+    const content = fs.readFileSync(result.compactionsFilePath, 'utf8');
+
+    assert.deepEqual(result.compactionEntries, []);
+    assert.ok(path.isAbsolute(result.compactionsFilePath));
+    assert.equal(result.filePath, result.compactionsFilePath);
+    assert.match(content, /No live compaction knowledge entries were found/);
+  }));
+
+test('http knowledge: parses model@provider for OpenRouter provider pinning', () => {
+  assert.deepEqual(
+    __private.parseProviderPinnedModel('moonshotai/kimi-k2-0905@groq'),
+    {
+      baseModel: 'moonshotai/kimi-k2-0905',
+      provider: 'groq',
+    },
+  );
+});
+
+test('http knowledge: leaves model unchanged when no provider suffix is present', () => {
+  assert.deepEqual(
+    __private.parseProviderPinnedModel('openai/gpt-4.1-mini'),
+    {
+      baseModel: 'openai/gpt-4.1-mini',
+      provider: null,
+    },
+  );
+});
+
+test('http knowledge: OpenRouter request body includes provider pinning and strips the suffix', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'moonshotai/kimi-k2-0905@groq',
+      baseUrl: 'https://openrouter.ai/api/v1',
+    });
+    let request = null;
+
+    const result = await __private.invokeHttpSummary('provider-pinning-prompt', config, {
+      fetch: async (url, options) => {
+        request = {
+          url,
+          options,
+          body: JSON.parse(options.body),
+        };
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify(summaryFor('provider-pinned')),
+                },
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions');
+    assert.equal(request.body.model, 'moonshotai/kimi-k2-0905');
+    assert.deepEqual(request.body.provider, {
+      order: ['groq'],
+      allow_fallbacks: false,
+      require_parameters: true,
+    });
+    assert.equal(request.body.messages[1].content, 'provider-pinning-prompt');
+    assert.equal(result.repositoryOverview, 'Overview provider-pinned');
+  }));
+
+test('http knowledge: model@provider is rejected for non-OpenRouter base URLs', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'moonshotai/kimi-k2-0905@groq',
+      baseUrl: 'https://api.openai.com/v1',
+    });
+    let called = false;
+
+    await assert.rejects(
+      __private.invokeHttpSummary('provider-pinning-prompt', config, {
+        fetch: async () => {
+          called = true;
+          throw new Error('fetch should not be called');
+        },
+      }),
+      /requires CHAT_SEARCH_KNOWLEDGE_BASE_URL to point to OpenRouter/i,
+    );
+
+    assert.equal(called, false);
+  }));
+
+test('http knowledge: request body stays unchanged when no provider suffix is present', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'openai/gpt-4.1-mini',
+      baseUrl: 'https://openrouter.ai/api/v1',
+    });
+    let request = null;
+
+    await __private.invokeHttpSummary('plain-model-prompt', config, {
+      fetch: async (url, options) => {
+        request = {
+          url,
+          options,
+          body: JSON.parse(options.body),
+        };
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify(summaryFor('plain-model')),
+                },
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions');
+    assert.equal(request.body.model, 'openai/gpt-4.1-mini');
+    assert.equal('provider' in request.body, false);
   }));
 
 test('knowledge index: skips when fewer than 100 new messages exist', async () =>
@@ -573,9 +775,8 @@ test('base knowledge: includes persisted summaries when indexing is enabled and 
       'utf8',
     );
 
-    const result = buildBaseKnowledgeResponse([makeSession({ count: 10 })], config, { limit: 3 });
+    const result = buildBaseKnowledgeResponse([makeSession({ count: 10 })], config, {});
     const combinedText = fs.readFileSync(result.combinedKnowledgeFilePath, 'utf8');
-    const heuristicsText = fs.readFileSync(result.heuristicsFilePath, 'utf8');
 
     assert.equal(result.indexing.enabled, true);
     assert.equal(result.indexedRuns.length, 1);
@@ -583,9 +784,10 @@ test('base knowledge: includes persisted summaries when indexing is enabled and 
     assert.equal(result.indexedRuns[0].filePath, absolutePath);
     assert.equal('messageIds' in result.indexedRuns[0], false);
     assert.match(combinedText, /Persisted line 1/);
-    assert.match(heuristicsText, /# Live Heuristic Knowledge/);
+    assert.doesNotMatch(combinedText, /Live Heuristic Knowledge/);
     assert.equal(result.truncated, true);
     assert.ok(path.isAbsolute(result.combinedKnowledgeFilePath));
-    assert.ok(path.isAbsolute(result.heuristicsFilePath));
+    assert.equal('heuristicEntries' in result, false);
+    assert.equal('heuristicsFilePath' in result, false);
     assert.match(result.message, /stored in files/i);
   }));

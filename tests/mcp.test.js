@@ -197,7 +197,7 @@ test('MCP: initialize also works with legacy Content-Length framing', async () =
   }
 });
 
-test('MCP: tools/list returns 7 tools with correct names', async () => {
+test('MCP: tools/list returns 8 tools with correct names', async () => {
   const fixtures = setupTempFixtures();
   const proc = spawnMcp(fixtures);
 
@@ -225,11 +225,12 @@ test('MCP: tools/list returns 7 tools with correct names', async () => {
     assert.equal(response.id, 2);
     assert.ok(response.result, 'should have result');
     assert.ok(response.result.tools, 'should have tools array');
-    assert.equal(response.result.tools.length, 7, 'should have exactly 7 tools');
+    assert.equal(response.result.tools.length, 8, 'should have exactly 8 tools');
 
     const toolNames = response.result.tools.map((t) => t.name).sort();
     assert.deepEqual(toolNames, [
       'chat.base_knowledge',
+      'chat.compaction_knowledge',
       'chat.grep',
       'chat.knowledge_index',
       'chat.list_sessions',
@@ -325,15 +326,28 @@ test('MCP: knowledge tools return disabled indexing state by default', async () 
       },
     });
 
+    const compactionKnowledge = await sendRpc(proc, {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: {
+        name: 'chat.compaction_knowledge',
+        arguments: {},
+      },
+    });
+
     const baseData = JSON.parse(baseKnowledge.result.content[0].text);
     const indexData = JSON.parse(indexKnowledge.result.content[0].text);
+    const compactionData = JSON.parse(compactionKnowledge.result.content[0].text);
 
     assert.equal(baseData.indexing.enabled, false);
-    assert.ok(Array.isArray(baseData.heuristicEntries));
-    assert.ok(path.isAbsolute(baseData.heuristicsFilePath));
     assert.ok(path.isAbsolute(baseData.combinedKnowledgeFilePath));
+    assert.equal('heuristicEntries' in baseData, false);
+    assert.equal('heuristicsFilePath' in baseData, false);
     assert.equal(typeof baseData.message, 'string');
     assert.equal(indexData.status, 'disabled');
+    assert.ok(Array.isArray(compactionData.compactionEntries));
+    assert.ok(path.isAbsolute(compactionData.compactionsFilePath));
   } finally {
     proc.kill();
     fixtures.cleanup();

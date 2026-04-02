@@ -149,7 +149,8 @@ If `--repo` is omitted, the current working directory is used.
 | `chat.grep` | Pattern search with `|`, `&`, and regex support |
 | `chat.read_session` | Reads messages from a session by index range |
 | `chat.read_lines` | Reads lines around a keyword or regex match |
-| `chat.base_knowledge` | Returns metadata plus absolute file paths for the live and persisted knowledge snapshots |
+| `chat.base_knowledge` | Returns metadata plus absolute file paths for persisted indexed knowledge snapshots |
+| `chat.compaction_knowledge` | Returns metadata plus an absolute file path for live compaction knowledge |
 | `chat.knowledge_index` | Builds or refreshes persisted repository knowledge under `.repochatmcp/knowledge/` |
 
 ### Example tool inputs
@@ -170,19 +171,25 @@ If `--repo` is omitted, the current working directory is used.
 { "force": true }
 ```
 
+```json
+{ "provider": "codex", "limit": 10, "query": "database" }
+```
+
 ## Optional Knowledge Indexing
 
 Knowledge indexing is disabled by default.
 
 When disabled:
 
-- `chat.base_knowledge` still returns persisted knowledge file paths if prior indexed runs already exist, plus the live heuristic snapshot file path
+- `chat.base_knowledge` still returns persisted knowledge file paths if prior indexed runs already exist
+- `chat.compaction_knowledge` returns a live compaction snapshot file path
 - `chat.knowledge_index` returns a configuration message instead of indexing
 
 When enabled:
 
 - `chat.knowledge_index` summarizes new chat history into persisted markdown files
-- `chat.base_knowledge` returns absolute paths for the merged snapshot, the live heuristic snapshot, and the persisted indexed run files
+- `chat.base_knowledge` returns absolute paths for the merged persisted snapshot and the persisted indexed run files
+- `chat.compaction_knowledge` returns absolute paths for live compaction-only knowledge
 - `.repochatmcp/` is automatically added to the repo root `.gitignore`
 
 Stored files:
@@ -215,7 +222,8 @@ Indexing rules:
       "args": ["/c", "chat-search-mcp", "mcp"],
       "env": {
         "CHAT_SEARCH_KNOWLEDGE_BACKEND": "http",
-        "CHAT_SEARCH_KNOWLEDGE_MODEL": "gpt-4.1-mini",
+        "CHAT_SEARCH_KNOWLEDGE_BASE_URL": "https://openrouter.ai/api/v1",
+        "CHAT_SEARCH_KNOWLEDGE_MODEL": "moonshotai/kimi-k2-0905@groq",
         "CHAT_SEARCH_KNOWLEDGE_API_KEY": "your-api-key",
         "CHAT_SEARCH_KNOWLEDGE_MAX_CHARS": "500000",
         "CHAT_SEARCH_KNOWLEDGE_HTTP_CONCURRENCY": "3"
@@ -235,6 +243,12 @@ Supported env vars:
 - `CHAT_SEARCH_KNOWLEDGE_TIMEOUT_MS`
 - `CHAT_SEARCH_KNOWLEDGE_CODEX_BIN`
 - `CHAT_SEARCH_KNOWLEDGE_HTTP_CONCURRENCY`
+
+OpenRouter provider pinning:
+
+- set `CHAT_SEARCH_KNOWLEDGE_BASE_URL=https://openrouter.ai/api/v1`
+- use `CHAT_SEARCH_KNOWLEDGE_MODEL=model@provider`, for example `moonshotai/kimi-k2-0905@groq`
+- `@provider` is only valid for the OpenRouter HTTP backend
 
 ## Unified Message Model
 
