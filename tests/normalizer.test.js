@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.join(__dirname, 'fixtures');
 const claudeFixture = path.join(fixturesDir, 'claude-session.jsonl');
 const codexFixture = path.join(fixturesDir, 'codex-session.jsonl');
+const codexModernCompactionFixture = path.join(fixturesDir, 'codex-session-modern-compaction.jsonl');
 
 // ── Claude session tests ─────────────────────────────────────────────
 
@@ -87,6 +88,26 @@ test('Codex: compacted entry produces type compaction', () => {
     'metadata should include replacementHistory array',
   );
   assert.deepEqual(compaction.metadata.replacementHistory, [0, 1, 2]);
+});
+
+test('Codex: empty plaintext compaction falls back to replacement_history text', () => {
+  const session = normalizeSession(codexModernCompactionFixture, 'codex');
+  const compaction = session.messages.find((m) => m.type === 'compaction');
+
+  assert.ok(compaction, 'should have a compaction message');
+  assert.equal(compaction.role, 'system');
+  assert.ok(compaction.text.includes('replacement history fallback'), 'should include fallback note');
+  assert.ok(
+    compaction.text.includes('Investigate why chat.compaction_knowledge returns blank text'),
+    'should include user text from replacement history',
+  );
+  assert.ok(
+    compaction.text.includes('assistant: Codex now leaves payload.message empty'),
+    'should include assistant text from replacement history',
+  );
+  assert.ok(compaction.text.includes('[image]'), 'should preserve image placeholders in fallback text');
+  assert.equal(compaction.metadata.usedReplacementHistoryFallback, true);
+  assert.equal(compaction.metadata.replacementHistory.length, 3);
 });
 
 test('Codex: developer role produces type system', () => {

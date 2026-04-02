@@ -15,6 +15,21 @@ function loadSessions() {
   return [claude, codex];
 }
 
+test('collectCompactionKnowledge: uses replacement_history fallback for modern Codex compactions', () => {
+  const modernCodex = normalizeSession(
+    path.join(fixturesDir, 'codex-session-modern-compaction.jsonl'),
+    'codex',
+  );
+  const entries = collectCompactionKnowledge([modernCodex]);
+
+  assert.equal(entries.length, 1, 'should include the modern compaction entry');
+  assert.ok(entries[0].text.length > 0, 'fallback compaction text should not be empty');
+  assert.ok(
+    entries[0].text.includes('replacement history fallback'),
+    'should preserve the fallback note for modern Codex compactions',
+  );
+});
+
 test('collectCompactionKnowledge: returns compaction entries from Codex', () => {
   const sessions = loadSessions();
   const entries = collectCompactionKnowledge(sessions);

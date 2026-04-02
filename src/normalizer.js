@@ -1,5 +1,5 @@
 import { basename } from 'path';
-import { readJsonLines } from './utils.js';
+import { clip, readJsonLines } from './utils.js';
 
 const SKIP_TYPES = new Set([
   'file-history-snapshot',
@@ -8,6 +8,8 @@ const SKIP_TYPES = new Set([
   'queue-operation',
   'progress',
 ]);
+
+const CODEX_COMPACTION_FALLBACK_MAX_CHARS = 12000;
 
 /**
  * Extract text from Claude content array/string.
@@ -188,9 +190,57 @@ function extractCodexText(content) {
   for (const block of content) {
     if (block.text) {
       parts.push(block.text);
+    } else if (block.type === 'input_image') {
+      parts.push('[image]');
     }
   }
   return parts.join('\n');
+}
+
+function extractCodexReplacementHistoryText(replacementHistory) {
+  if (!Array.isArray(replacementHistory) || replacementHistory.length === 0) {
+    return '';
+  }
+
+  const parts = [];
+  for (const item of replacementHistory) {
+    if (!item || typeof item !== 'object') continue;
+
+    if (item.type === 'message') {
+      const text = extractCodexText(item.content || []);
+      if (!text) continue;
+      const role = item.role || 'unknown';
+      parts.push(`${role}: ${text}`);
+      continue;
+    }
+
+    const text = item.text || item.message || '';
+    if (text) {
+      parts.push(text);
+    }
+  }
+
+  if (parts.length === 0) {
+    return '';
+  }
+
+  return clip(
+    [
+      '[Codex compaction summary unavailable in plaintext; showing replacement history fallback.]',
+      '',
+      ...parts,
+    ].join('\n\n'),
+    CODEX_COMPACTION_FALLBACK_MAX_CHARS,
+  );
+}
+
+function extractCodexCompactionText(payload) {
+  const directText = typeof payload?.message === 'string' ? payload.message.trim() : '';
+  if (directText) {
+    return directText;
+  }
+
+  return extractCodexReplacementHistoryText(payload?.replacement_history);
 }
 
 /**
@@ -274,6 +324,7 @@ function parseCodexSession(filePath, lines) {
     }
 
     if (recordType === 'compacted') {
+      const replacementHistory = line.payload?.replacement_history || null;
       messages.push({
         provider: 'codex',
         sessionId,
@@ -281,9 +332,10 @@ function parseCodexSession(filePath, lines) {
         timestamp,
         type: 'compaction',
         role: 'system',
-        text: line.payload?.message || '',
+        text: extractCodexCompactionText(line.payload),
         metadata: {
-          replacementHistory: line.payload?.replacement_history || null,
+          replacementHistory,
+          usedReplacementHistoryFallback: !line.payload?.message && Array.isArray(replacementHistory),
         },
       });
       continue;
