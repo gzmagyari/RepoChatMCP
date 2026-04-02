@@ -3,7 +3,7 @@
     "chat-search": {
       "type": "stdio",
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "chat-search-mcp@latest", "mcp"]
+      "args": ["/c", "npx", "-y", "chat-search-mcp@0.1.6", "mcp"]
     }
   }
 }

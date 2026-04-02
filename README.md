@@ -1,135 +1,67 @@
-# chat-search
+# RepoChatMCP
 
-MCP server that lets any AI agent search through Claude Code and Codex CLI chat session histories. Both providers are normalized into a unified format so you can search across all your coding sessions in one place.
+Search Claude Code and Codex chat history like source code.
 
-Zero dependencies. Reads JSONL session files directly from disk. No database, no setup.
+[![npm version](https://img.shields.io/npm/v/chat-search-mcp?style=for-the-badge)](https://www.npmjs.com/package/chat-search-mcp)
+[![node >= 22](https://img.shields.io/badge/node-%3E%3D22-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![GitHub stars](https://img.shields.io/github/stars/gzmagyari/RepoChatMCP?style=for-the-badge)](https://github.com/gzmagyari/RepoChatMCP)
+[![MIT license](https://img.shields.io/github/license/gzmagyari/RepoChatMCP?style=for-the-badge)](https://github.com/gzmagyari/RepoChatMCP/blob/main/LICENSE)
+
+RepoChatMCP is a zero-dependency MCP server and CLI for searching local Claude Code and Codex session files. It normalizes both providers into one message model, exposes search and read tools over MCP, and can optionally build a persisted repository knowledge index from your chat history.
+
+No database. No background service. No telemetry. Just your local JSONL session files.
+
+## Why Use It
+
+- Search Claude Code and Codex history from one MCP server
+- Read sessions by message range or lines around a match
+- Grep chats with AND, OR, and regex patterns
+- Build repo knowledge summaries from prior chats
+- Run locally with zero runtime dependencies
+
+## Package And Commands
+
+- Published npm package: `chat-search-mcp`
+- Installed CLI commands: `chat-search` and `chat-search-mcp`
+- Runtime requirement: Node.js 22+
 
 ## Install
 
+### Use the published npm package
+
+Install it first:
+
 ```bash
+npm install -g chat-search-mcp@latest
+```
+
+Then use it:
+
+```bash
+chat-search status --repo /path/to/repo
+chat-search search "authentication" --repo /path/to/repo
+```
+
+### Use the local repo checkout
+
+```bash
+git clone https://github.com/gzmagyari/RepoChatMCP.git
+cd RepoChatMCP
 npm install
-npm link  # optional, makes `chat-search` available globally
+node ./bin/chat-search.js status --repo .
 ```
 
-Requires Node.js 22+.
+## Claude Code Setup
 
-## Quick start
+### Project MCP from a local checkout
 
-```bash
-# Start as an MCP server (default — used by Claude Code, Codex, or any MCP client)
-chat-search mcp --repo /path/to/your/repo
-
-# Check what sessions are available
-chat-search status --repo /path/to/your/repo
-
-# Search from the command line
-chat-search search --query "authentication" --repo /path/to/your/repo
-```
-
-If `--repo` is omitted, the current working directory is used.
-
-## MCP tools
-
-### `chat.list_sessions`
-
-List all discovered sessions for the repo.
-
-```json
-{ "provider": "codex", "limit": 10 }
-```
-
-### `chat.search`
-
-Keyword search with relevance scoring across all sessions.
-
-```json
-{ "query": "JWT token security", "provider": "claude", "types": ["assistant"], "limit": 5 }
-```
-
-### `chat.grep`
-
-Pattern matching with AND/OR/regex support.
-
-```json
-{ "pattern": "winEscapeArg&spawnCommand" }
-{ "pattern": "authentication|login|session" }
-{ "pattern": "/function\\s+\\w+Auth/i" }
-```
-
-### `chat.read_session`
-
-Read messages from a specific session by ID.
-
-```json
-{ "sessionId": "8ac646f8-1bec-...", "startIndex": 0, "endIndex": 50 }
-```
-
-### `chat.read_lines`
-
-Read lines around keyword or regex matches in a session.
-
-```json
-{ "sessionId": "8ac646f8-...", "aroundKeyword": "database", "contextLines": 3 }
-```
-
-### `chat.base_knowledge`
-
-Get a quick knowledge primer — returns the latest compactions (Codex) and high-signal assistant messages.
-
-```json
-{ "limit": 10, "query": "auth", "writeToFile": true }
-```
-
-When `writeToFile` is true, writes results to a temp markdown file and returns the path instead of inline content.
-
-## Unified message format
-
-Messages from both Claude Code and Codex are normalized to:
-
-```javascript
-{
-  provider: "claude" | "codex",
-  sessionId: "uuid...",
-  index: 42,
-  timestamp: "2026-03-25T...",
-  type: "user" | "assistant" | "tool_call" | "tool_result" | "system" | "compaction",
-  role: "user" | "assistant" | "system" | "developer" | "tool",
-  text: "..."
-}
-```
-
-| Source | Normalized type |
-|---|---|
-| Claude user message | `user` |
-| Claude assistant message | `assistant` |
-| Claude assistant with tool_use | `tool_call` |
-| Claude user with tool_result | `tool_result` |
-| Claude system message | `system` |
-| Codex user response_item | `user` |
-| Codex assistant response_item | `assistant` |
-| Codex developer response_item | `system` |
-| Codex compacted entry | `compaction` |
-
-## Where session files live
-
-**Claude Code**: `~/.claude/projects/<encoded-repo-path>/*.jsonl`
-
-The repo path is encoded as: drive letter lowercased, colon replaced with dash, slashes replaced with dashes. For example `C:\xampp\htdocs\MyApp` becomes `c--xampp-htdocs-MyApp`.
-
-**Codex**: `~/.codex/sessions/<year>/<month>/<day>/*.jsonl`
-
-Codex sessions are matched to repos by reading the `session_meta` entry's `cwd` field.
-
-Both paths are configurable via `--claude-root` and `--codex-sessions` flags or `CHAT_SEARCH_CLAUDE_ROOT` and `CHAT_SEARCH_CODEX_SESSIONS` environment variables.
-
-## Use as an MCP in Claude Code
-
-Add to your `.mcp.json`:
+Use this when you cloned the repo and want Claude Code to run the local source directly:
 
 ```json
 {
   "mcpServers": {
     "chat-search": {
+      "type": "stdio",
       "command": "node",
       "args": ["./bin/chat-search.js"]
     }
@@ -137,13 +69,15 @@ Add to your `.mcp.json`:
 }
 ```
 
-If you cloned this repo directly, that relative path is enough. Claude Code runs the project MCP from the repo, so `chat-search` can use the current working directory as the target repo without `--repo`.
+Claude Code runs project MCPs from the repo directory, so `./bin/chat-search.js` works and the current repo becomes the default target.
 
-If you want to point at a different checkout instead of the current repo, use an absolute path or pass `--repo`.
+### Use the published npm package
 
-## Use the published npm package
+Install it first:
 
-For a user-scoped or local-scoped MCP installed from npm, use the published package instead of the repo checkout.
+```bash
+npm install -g chat-search-mcp@latest
+```
 
 macOS / Linux:
 
@@ -152,8 +86,8 @@ macOS / Linux:
   "mcpServers": {
     "chat-search": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "chat-search-mcp@latest", "mcp"]
+      "command": "chat-search-mcp",
+      "args": ["mcp"]
     }
   }
 }
@@ -167,31 +101,181 @@ Windows:
     "chat-search": {
       "type": "stdio",
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "chat-search-mcp@latest", "mcp"]
+      "args": ["/c", "chat-search-mcp", "mcp"]
     }
   }
 }
 ```
 
-On native Windows, Claude Code cannot directly execute `npx` for local stdio MCP servers. If you use `command: "npx"` there, Claude will typically show `MCP error -32000: Connection closed`.
+## Codex Setup
 
-## Use as an MCP in Codex
-
-Add to `~/.codex/config.toml`:
+Local checkout:
 
 ```toml
 [mcp_servers.chat_search]
 command = "node"
-args = ["/path/to/chat-search/bin/chat-search.js"]
+args = ["C:/path/to/RepoChatMCP/bin/chat-search.js"]
 ```
 
-## Tests
+Published npm package on Windows:
+
+```toml
+[mcp_servers.chat_search]
+command = "cmd"
+args = ["/c", "chat-search-mcp", "mcp"]
+```
+
+## CLI Quick Start
+
+```bash
+# MCP server
+chat-search mcp --repo /path/to/repo
+
+# Show discovered session counts
+chat-search status --repo /path/to/repo
+
+# Search across chats
+chat-search search "jwt token" --repo /path/to/repo
+```
+
+If `--repo` is omitted, the current working directory is used.
+
+## MCP Tools
+
+| Tool | What it does |
+|---|---|
+| `chat.list_sessions` | Lists discovered Claude Code and Codex sessions for the repo |
+| `chat.search` | Full-text search with relevance scoring |
+| `chat.grep` | Pattern search with `|`, `&`, and regex support |
+| `chat.read_session` | Reads messages from a session by index range |
+| `chat.read_lines` | Reads lines around a keyword or regex match |
+| `chat.base_knowledge` | Returns metadata plus absolute file paths for the live and persisted knowledge snapshots |
+| `chat.knowledge_index` | Builds or refreshes persisted repository knowledge under `.repochatmcp/knowledge/` |
+
+### Example tool inputs
+
+```json
+{ "query": "database pooling", "provider": "claude", "limit": 5 }
+```
+
+```json
+{ "pattern": "authentication&jwt" }
+```
+
+```json
+{ "sessionId": "8ac646f8-1bec-...", "startIndex": 0, "endIndex": 50 }
+```
+
+```json
+{ "force": true }
+```
+
+## Optional Knowledge Indexing
+
+Knowledge indexing is disabled by default.
+
+When disabled:
+
+- `chat.base_knowledge` still returns persisted knowledge file paths if prior indexed runs already exist, plus the live heuristic snapshot file path
+- `chat.knowledge_index` returns a configuration message instead of indexing
+
+When enabled:
+
+- `chat.knowledge_index` summarizes new chat history into persisted markdown files
+- `chat.base_knowledge` returns absolute paths for the merged snapshot, the live heuristic snapshot, and the persisted indexed run files
+- `.repochatmcp/` is automatically added to the repo root `.gitignore`
+
+Stored files:
+
+- `.repochatmcp/knowledge/manifest.json`
+- `.repochatmcp/knowledge/runs/*.md`
+
+Indexing rules:
+
+- minimum 100 new or changed messages before indexing runs
+- split only when transcript size exceeds `CHAT_SEARCH_KNOWLEDGE_MAX_CHARS`
+- Codex chunk calls run sequentially
+- HTTP chunk calls run with limited concurrency
+
+### Backends
+
+- `off`: disabled
+- `auto`: prefer HTTP if API config is present, otherwise use Codex CLI
+- `http`: OpenAI-compatible HTTP requests
+- `codex`: Codex CLI over stdin
+
+### MCP env config
+
+```json
+{
+  "mcpServers": {
+    "chat-search": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "chat-search-mcp", "mcp"],
+      "env": {
+        "CHAT_SEARCH_KNOWLEDGE_BACKEND": "http",
+        "CHAT_SEARCH_KNOWLEDGE_MODEL": "gpt-4.1-mini",
+        "CHAT_SEARCH_KNOWLEDGE_API_KEY": "your-api-key",
+        "CHAT_SEARCH_KNOWLEDGE_MAX_CHARS": "500000",
+        "CHAT_SEARCH_KNOWLEDGE_HTTP_CONCURRENCY": "3"
+      }
+    }
+  }
+}
+```
+
+Supported env vars:
+
+- `CHAT_SEARCH_KNOWLEDGE_BACKEND=off|auto|http|codex`
+- `CHAT_SEARCH_KNOWLEDGE_MODEL`
+- `CHAT_SEARCH_KNOWLEDGE_BASE_URL`
+- `CHAT_SEARCH_KNOWLEDGE_API_KEY`
+- `CHAT_SEARCH_KNOWLEDGE_MAX_CHARS`
+- `CHAT_SEARCH_KNOWLEDGE_TIMEOUT_MS`
+- `CHAT_SEARCH_KNOWLEDGE_CODEX_BIN`
+- `CHAT_SEARCH_KNOWLEDGE_HTTP_CONCURRENCY`
+
+## Unified Message Model
+
+Both Claude Code and Codex are normalized to:
+
+```js
+{
+  provider: "claude" | "codex",
+  sessionId: "uuid-or-session-id",
+  index: 42,
+  timestamp: "2026-03-25T10:11:12.000Z",
+  type: "user" | "assistant" | "tool_call" | "tool_result" | "system" | "compaction",
+  role: "user" | "assistant" | "system" | "developer",
+  text: "message text"
+}
+```
+
+## Where Sessions Are Read From
+
+Claude Code:
+
+- `~/.claude/projects/<encoded-repo-path>/*.jsonl`
+
+Codex:
+
+- `~/.codex/sessions/<year>/<month>/<day>/*.jsonl`
+- `~/.codex/archived_sessions/...`
+
+Configurable roots:
+
+- `CHAT_SEARCH_CLAUDE_ROOT`
+- `CHAT_SEARCH_CODEX_SESSIONS`
+- `CHAT_SEARCH_CODEX_ARCHIVED`
+
+## Development
 
 ```bash
 npm test
 ```
 
-35 unit tests covering normalization, search, grep, knowledge collection, and MCP protocol integration.
+Current test suite: 57 tests covering discovery, normalization, search, MCP transport, live knowledge extraction, and persisted knowledge indexing.
 
 ## License
 

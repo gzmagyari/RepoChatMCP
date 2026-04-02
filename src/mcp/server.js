@@ -3,8 +3,7 @@ import { StdioJsonRpcServer } from './framing.js';
 import { discoverSessionFiles } from '../discovery.js';
 import { normalizeSession } from '../normalizer.js';
 import { searchMessages, grepMessages, readSession, readLines } from '../search.js';
-import { collectBaseKnowledge, writeKnowledgeToFile } from '../knowledge.js';
-import { clip } from '../utils.js';
+import { buildBaseKnowledgeResponse, runKnowledgeIndex } from '../knowledge-index.js';
 
 export const SUPPORTED_PROTOCOL_VERSIONS = [
   '2025-06-18',
@@ -14,7 +13,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
 
 export const SERVER_INFO = {
   name: 'chat-search',
-  version: '0.1.0',
+  version: '0.1.6',
 };
 
 export function negotiateProtocolVersion(requestedVersion) {
@@ -176,14 +175,25 @@ const TOOLS = [
   },
   {
     name: 'chat.base_knowledge',
-    description: 'Collect base knowledge (compactions + high-signal messages) from sessions.',
+    description: 'Collect repository knowledge metadata and return absolute file paths for live and persisted knowledge snapshots.',
     inputSchema: {
       type: 'object',
       properties: {
         limit: { type: 'number', description: 'Max entries (default 20)' },
         query: { type: 'string', description: 'Optional query to boost relevant entries' },
         provider: { type: 'string', description: 'Filter by provider: claude or codex' },
-        writeToFile: { type: 'boolean', description: 'Write results to a temp file and return path' },
+        writeToFile: { type: 'boolean', description: 'Deprecated. A combined snapshot file path is returned automatically.' },
+      },
+    },
+  },
+  {
+    name: 'chat.knowledge_index',
+    description: 'Build or refresh the persisted repository knowledge index from all chat history.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        provider: { type: 'string', description: 'Optional provider filter: claude or codex' },
+        force: { type: 'boolean', description: 'Force a full rebuild of the persisted knowledge index' },
       },
     },
   },
@@ -279,18 +289,20 @@ export function createMcpRequestHandler(config) {
 
       case 'chat.base_knowledge': {
         const sessions = getSessions(params.provider);
-        const entries = collectBaseKnowledge(sessions, {
+        return buildBaseKnowledgeResponse(sessions, config, {
           limit: params.limit ?? 20,
           query: params.query,
           provider: params.provider,
+          writeToFile: params.writeToFile === true,
         });
+      }
 
-        if (params.writeToFile) {
-          const filePath = writeKnowledgeToFile(entries);
-          return { filePath, entryCount: entries.length };
-        }
-
-        return entries;
+      case 'chat.knowledge_index': {
+        const sessions = getSessions(params.provider);
+        return await runKnowledgeIndex(sessions, config, {
+          provider: params.provider,
+          force: params.force === true,
+        });
       }
 
       default:

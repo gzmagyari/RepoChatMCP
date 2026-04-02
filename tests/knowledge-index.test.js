@@ -1,0 +1,591 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  KNOWLEDGE_DISABLED_MESSAGE,
+  buildBaseKnowledgeResponse,
+  loadKnowledgeManifest,
+  runKnowledgeIndex,
+} from '../src/knowledge-index.js';
+
+function makeConfig(repoPath, knowledge = {}) {
+  return {
+    repoPath,
+    claudeRoot: repoPath,
+    codexSessionsRoot: repoPath,
+    codexArchivedRoot: repoPath,
+    includeArchived: true,
+    defaultLimit: 20,
+    defaultContextMessages: 1,
+    knowledge: {
+      backend: 'off',
+      model: null,
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: null,
+      maxChars: 500000,
+      timeoutMs: 5000,
+      codexBin: 'codex',
+      httpConcurrency: 3,
+      ...knowledge,
+    },
+  };
+}
+
+async function withTempRepo(run) {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), 'repochatmcp-knowledge-'));
+  try {
+    return await run(repoPath);
+  } finally {
+    fs.rmSync(repoPath, { recursive: true, force: true });
+  }
+}
+
+function isoAt(index) {
+  return new Date(Date.UTC(2026, 3, 2, 10, 0, index)).toISOString();
+}
+
+function makeSession({
+  provider = 'claude',
+  sessionId = `${provider}-session`,
+  count = 120,
+  textSize = 80,
+  textPrefix = `${provider} message`,
+} = {}) {
+  const messages = [];
+
+  for (let index = 0; index < count; index++) {
+    const isAssistant = index % 2 === 1;
+    const type = isAssistant ? 'assistant' : 'user';
+    const role = isAssistant ? 'assistant' : 'user';
+    const body = `${textPrefix} ${index} ${'x'.repeat(textSize)}`;
+    messages.push({
+      provider,
+      sessionId,
+      index,
+      timestamp: isoAt(index),
+      type,
+      role,
+      text: isAssistant ? `${body}\n${'detail '.repeat(40)}` : body,
+      metadata: {},
+    });
+  }
+
+  return {
+    provider,
+    sessionId,
+    cwd: '/tmp/test-repo',
+    gitBranch: 'main',
+    startedAt: messages[0]?.timestamp || null,
+    endedAt: messages[messages.length - 1]?.timestamp || null,
+    messageCount: messages.length,
+    messages,
+  };
+}
+
+function summaryFor(label, extraLines = 0) {
+  return {
+    repositoryOverview: `Overview ${label}`,
+    architectureServices: [`Architecture ${label}`],
+    importantUrlsPorts: [`URL ${label}`],
+    repoStructure: extraLines > 0
+      ? Array.from({ length: extraLines }, (_, index) => `Line ${index + 1} ${label}`)
+      : [`Structure ${label}`],
+    implementedWork: [`Implemented ${label}`],
+    rulesConstraints: [`Rule ${label}`],
+    currentState: [`State ${label}`],
+    openIssuesNextSteps: [`Next ${label}`],
+  };
+}
+
+test('knowledge index: disabled mode returns configuration-required response', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'off' });
+    const session = makeSession({ count: 120 });
+
+    const result = await runKnowledgeIndex([session], config);
+
+    assert.equal(result.status, 'disabled');
+    assert.equal(result.backend, 'off');
+    assert.match(result.message, /disabled/i);
+  }));
+
+test('base knowledge: disabled mode stays heuristics-only', () =>
+  withTempRepo((repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'off' });
+    const session = makeSession({ count: 20 });
+
+    const result = buildBaseKnowledgeResponse([session], config, { limit: 5 });
+
+    assert.equal(result.indexing.enabled, false);
+    assert.equal(result.indexing.message, KNOWLEDGE_DISABLED_MESSAGE);
+    assert.equal(result.indexedRuns.length, 0);
+    assert.ok(result.heuristicEntries.length > 0);
+    assert.ok(path.isAbsolute(result.heuristicsFilePath));
+    assert.ok(path.isAbsolute(result.combinedKnowledgeFilePath));
+    assert.equal(fs.existsSync(result.heuristicsFilePath), true);
+    assert.equal(fs.existsSync(result.combinedKnowledgeFilePath), true);
+    assert.equal(result.filePath, result.combinedKnowledgeFilePath);
+  }));
+
+test('base knowledge: disabled mode still loads persisted knowledge runs from the manifest', () =>
+  withTempRepo((repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'off' });
+    const knowledgeRoot = path.join(repoPath, '.repochatmcp', 'knowledge');
+    const runsDir = path.join(knowledgeRoot, 'runs');
+    fs.mkdirSync(runsDir, { recursive: true });
+
+    const relativePath = path.join('runs', 'knowledge-disabled-run.md');
+    const absolutePath = path.join(knowledgeRoot, relativePath);
+    fs.writeFileSync(absolutePath, '# Repository Knowledge Summary\n\nPersisted disabled-mode knowledge.\n', 'utf8');
+    fs.writeFileSync(
+      path.join(knowledgeRoot, 'manifest.json'),
+      JSON.stringify(
+        {
+          version: 1,
+          repoPath,
+          configFingerprint: 'test',
+          indexedMessages: {},
+          runs: [
+            {
+              id: 'disabled-run',
+              createdAt: '2026-04-02T12:00:00.000Z',
+              backend: 'http',
+              provider: null,
+              messageCount: 120,
+              messageIds: [],
+              filePath: relativePath,
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    const result = buildBaseKnowledgeResponse([makeSession({ count: 10 })], config, { limit: 3 });
+    const combinedText = fs.readFileSync(result.combinedKnowledgeFilePath, 'utf8');
+
+    assert.equal(result.indexing.enabled, false);
+    assert.equal(result.indexedRuns.length, 1);
+    assert.deepEqual(result.indexedKnowledgeFilePaths, [absolutePath]);
+    assert.match(result.indexing.message, /loaded 1 persisted knowledge run/i);
+    assert.match(combinedText, /Persisted disabled-mode knowledge/);
+  }));
+
+test('knowledge index: skips when fewer than 100 new messages exist', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const session = makeSession({ count: 99 });
+    let called = false;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async () => {
+        called = true;
+        return summaryFor('should-not-run');
+      },
+    });
+
+    assert.equal(result.status, 'skipped');
+    assert.equal(result.pendingMessages, 99);
+    assert.equal(called, false);
+  }));
+
+test('knowledge index: writes one persisted run when all pending messages fit in one chunk', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxChars: 500000,
+    });
+    const session = makeSession({ count: 120, textSize: 40 });
+    let calls = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async () => {
+        calls++;
+        return summaryFor(`http-${calls}`);
+      },
+    });
+
+    const manifest = loadKnowledgeManifest(config);
+
+    assert.equal(result.status, 'indexed');
+    assert.equal(result.backend, 'http');
+    assert.equal(result.chunkCount, 1);
+    assert.equal(result.filesWritten, 1);
+    assert.equal(calls, 1);
+    assert.equal(manifest.runs.length, 1);
+    assert.equal(Object.keys(manifest.indexedMessages).length, 120);
+    assert.ok(fs.existsSync(result.filePath));
+    assert.equal(result.gitignorePath, path.join(repoPath, '.gitignore'));
+    assert.match(fs.readFileSync(result.gitignorePath, 'utf8'), /\.repochatmcp\//);
+  }));
+
+test('knowledge index: creates .gitignore automatically when missing', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const session = makeSession({ count: 120 });
+
+    assert.equal(fs.existsSync(path.join(repoPath, '.gitignore')), false);
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async () => summaryFor('create-gitignore'),
+    });
+
+    assert.equal(result.status, 'indexed');
+    assert.equal(result.gitignorePath, path.join(repoPath, '.gitignore'));
+    assert.equal(fs.existsSync(result.gitignorePath), true);
+    assert.equal(fs.readFileSync(result.gitignorePath, 'utf8'), '.repochatmcp/\n');
+  }));
+
+test('knowledge index: appends .repochatmcp to existing .gitignore without duplication', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const gitignorePath = path.join(repoPath, '.gitignore');
+    fs.writeFileSync(gitignorePath, '.qpanda/\n', 'utf8');
+    const session = makeSession({ count: 120 });
+
+    await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async () => summaryFor('append-gitignore'),
+    });
+
+    await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async () => summaryFor('append-gitignore-second'),
+    });
+
+    const content = fs.readFileSync(gitignorePath, 'utf8');
+    const matches = content.match(/(^|\r?\n)\.repochatmcp\/(\r?\n|$)/g) || [];
+
+    assert.match(content, /\.qpanda\//);
+    assert.equal(matches.length, 1);
+  }));
+
+test('knowledge index: splits oversized input and merges it into one persisted run', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxChars: 3500,
+    });
+    const session = makeSession({ count: 120, textSize: 260 });
+    let chunkCalls = 0;
+    let mergeCalls = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async (prompt) => {
+        if (prompt.includes('Partial summaries JSON:')) {
+          mergeCalls++;
+          return summaryFor('merged');
+        }
+
+        chunkCalls++;
+        return summaryFor(`chunk-${chunkCalls}`);
+      },
+    });
+
+    const manifest = loadKnowledgeManifest(config);
+    const storedText = fs.readFileSync(result.filePath, 'utf8');
+
+    assert.equal(result.status, 'indexed');
+    assert.ok(result.chunkCount > 1);
+    assert.equal(mergeCalls, 1);
+    assert.equal(manifest.runs.length, 1);
+    assert.match(storedText, /Overview merged/);
+    assert.ok(chunkCalls >= 2);
+  }));
+
+test('knowledge index: codex chunk execution is strictly sequential', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'codex',
+      maxChars: 3500,
+    });
+    const session = makeSession({ count: 120, textSize: 260 });
+    let active = 0;
+    let maxActive = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      detectCodexBackend: async () => ({ available: true, loggedIn: true, version: 'codex-test' }),
+      invokeCodexSummary: async (prompt) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active--;
+        return prompt.includes('Partial summaries JSON:')
+          ? summaryFor('codex-merge')
+          : summaryFor('codex-chunk');
+      },
+    });
+
+    assert.equal(result.status, 'indexed');
+    assert.equal(result.backend, 'codex');
+    assert.equal(maxActive, 1);
+    assert.ok(result.chunkCount > 1);
+  }));
+
+test('knowledge index: http chunk execution is capped at concurrency 3', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxChars: 2500,
+      httpConcurrency: 3,
+    });
+    const session = makeSession({ count: 140, textSize: 260 });
+    let active = 0;
+    let maxActive = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async (prompt) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active--;
+        return prompt.includes('Partial summaries JSON:')
+          ? summaryFor('http-merge')
+          : summaryFor('http-chunk');
+      },
+    });
+
+    assert.equal(result.status, 'indexed');
+    assert.equal(result.backend, 'http');
+    assert.ok(result.chunkCount > 1);
+    assert.ok(maxActive <= 3);
+  }));
+
+test('knowledge index: unchanged messages stay cached but changed messages re-enqueue the invalidated run', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const session = makeSession({ count: 120, textSize: 60 });
+    let callCount = 0;
+
+    const dependencies = {
+      invokeHttpSummary: async () => {
+        callCount++;
+        return summaryFor(`run-${callCount}`);
+      },
+    };
+
+    const first = await runKnowledgeIndex([session], config, {}, dependencies);
+    const second = await runKnowledgeIndex([session], config, {}, dependencies);
+
+    session.messages[10].text = `${session.messages[10].text}\nchanged`;
+
+    const third = await runKnowledgeIndex([session], config, {}, dependencies);
+    const manifest = loadKnowledgeManifest(config);
+
+    assert.equal(first.status, 'indexed');
+    assert.equal(second.status, 'skipped');
+    assert.equal(second.pendingMessages, 0);
+    assert.equal(third.status, 'indexed');
+    assert.equal(third.newMessages, 120);
+    assert.equal(manifest.runs.length, 1);
+  }));
+
+test('knowledge index: force rebuild removes the previous persisted run file', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const session = makeSession({ count: 120, textSize: 60 });
+
+    const first = await runKnowledgeIndex([session], config, {}, {
+      now: () => '2026-04-02T20:00:00.000Z',
+      invokeHttpSummary: async () => summaryFor('first'),
+    });
+
+    const firstPath = first.filePath;
+    assert.equal(fs.existsSync(firstPath), true);
+
+    const second = await runKnowledgeIndex([session], config, { force: true }, {
+      now: () => '2026-04-02T20:10:00.000Z',
+      invokeHttpSummary: async () => summaryFor('second'),
+    });
+
+    const manifest = loadKnowledgeManifest(config);
+
+    assert.equal(second.status, 'indexed');
+    assert.equal(fs.existsSync(second.filePath), true);
+    assert.equal(fs.existsSync(firstPath), false);
+    assert.equal(manifest.runs.length, 1);
+    assert.equal(manifest.runs[0].id, second.runId);
+  }));
+
+test('knowledge index: removes orphaned run files that are not referenced by the manifest', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const session = makeSession({ count: 120, textSize: 60 });
+    const runsDir = path.join(repoPath, '.repochatmcp', 'knowledge', 'runs');
+    fs.mkdirSync(runsDir, { recursive: true });
+
+    const orphanPath = path.join(runsDir, 'knowledge-orphan.md');
+    fs.writeFileSync(orphanPath, '# Orphaned knowledge\n', 'utf8');
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      invokeHttpSummary: async () => summaryFor('active'),
+    });
+
+    assert.equal(result.status, 'indexed');
+    assert.equal(fs.existsSync(orphanPath), false);
+    assert.equal(fs.existsSync(result.filePath), true);
+  }));
+
+test('knowledge index: auto mode prefers http when API config is present', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'auto',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const session = makeSession({ count: 120 });
+    let httpCalls = 0;
+    let codexCalls = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      detectCodexBackend: async () => ({ available: true, loggedIn: true, version: 'codex-test' }),
+      invokeHttpSummary: async () => {
+        httpCalls++;
+        return summaryFor('http');
+      },
+      invokeCodexSummary: async () => {
+        codexCalls++;
+        return summaryFor('codex');
+      },
+    });
+
+    assert.equal(result.backend, 'http');
+    assert.equal(httpCalls, 1);
+    assert.equal(codexCalls, 0);
+  }));
+
+test('knowledge index: auto mode falls back to codex when HTTP config is absent', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'auto' });
+    const session = makeSession({ count: 120 });
+    let codexCalls = 0;
+
+    const result = await runKnowledgeIndex([session], config, {}, {
+      detectCodexBackend: async () => ({ available: true, loggedIn: true, version: 'codex-test' }),
+      invokeCodexSummary: async () => {
+        codexCalls++;
+        return summaryFor('codex');
+      },
+    });
+
+    assert.equal(result.backend, 'codex');
+    assert.equal(codexCalls, 1);
+  }));
+
+test('knowledge index: http mode errors clearly when required config is missing', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'http', apiKey: null, model: null });
+    const session = makeSession({ count: 120 });
+
+    await assert.rejects(
+      runKnowledgeIndex([session], config),
+      /CHAT_SEARCH_KNOWLEDGE_API_KEY and CHAT_SEARCH_KNOWLEDGE_MODEL/,
+    );
+  }));
+
+test('knowledge index: codex mode errors clearly when Codex is unavailable', async () =>
+  withTempRepo(async (repoPath) => {
+    const config = makeConfig(repoPath, { backend: 'codex' });
+    const session = makeSession({ count: 120 });
+
+    await assert.rejects(
+      runKnowledgeIndex([session], config, {}, {
+        detectCodexBackend: async () => ({
+          available: false,
+          loggedIn: false,
+          reason: 'Codex CLI is not available.',
+        }),
+      }),
+      /Codex CLI is not available/,
+    );
+  }));
+
+test('base knowledge: includes persisted summaries when indexing is enabled and tails to newest 1000 lines', () =>
+  withTempRepo((repoPath) => {
+    const config = makeConfig(repoPath, {
+      backend: 'http',
+      apiKey: 'test-key',
+      model: 'test-model',
+    });
+    const knowledgeRoot = path.join(repoPath, '.repochatmcp', 'knowledge');
+    const runsDir = path.join(knowledgeRoot, 'runs');
+    fs.mkdirSync(runsDir, { recursive: true });
+
+    const relativePath = path.join('runs', 'knowledge-test-run.md');
+    const absolutePath = path.join(knowledgeRoot, relativePath);
+    const hugeContent = Array.from({ length: 1205 }, (_, index) => `Persisted line ${index + 1}`).join('\n');
+    fs.writeFileSync(absolutePath, hugeContent, 'utf8');
+    fs.writeFileSync(
+      path.join(knowledgeRoot, 'manifest.json'),
+      JSON.stringify(
+        {
+          version: 1,
+          repoPath,
+          configFingerprint: 'test',
+          indexedMessages: {},
+          runs: [
+            {
+              id: 'test-run',
+              createdAt: '2026-04-02T12:00:00.000Z',
+              backend: 'http',
+              provider: null,
+              messageCount: 120,
+              messageIds: [],
+              filePath: relativePath,
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    const result = buildBaseKnowledgeResponse([makeSession({ count: 10 })], config, { limit: 3 });
+    const combinedText = fs.readFileSync(result.combinedKnowledgeFilePath, 'utf8');
+    const heuristicsText = fs.readFileSync(result.heuristicsFilePath, 'utf8');
+
+    assert.equal(result.indexing.enabled, true);
+    assert.equal(result.indexedRuns.length, 1);
+    assert.deepEqual(result.indexedKnowledgeFilePaths, [absolutePath]);
+    assert.equal(result.indexedRuns[0].filePath, absolutePath);
+    assert.equal('messageIds' in result.indexedRuns[0], false);
+    assert.match(combinedText, /Persisted line 1/);
+    assert.match(heuristicsText, /# Live Heuristic Knowledge/);
+    assert.equal(result.truncated, true);
+    assert.ok(path.isAbsolute(result.combinedKnowledgeFilePath));
+    assert.ok(path.isAbsolute(result.heuristicsFilePath));
+    assert.match(result.message, /stored in files/i);
+  }));

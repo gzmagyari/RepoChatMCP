@@ -1,7 +1,7 @@
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { tokenize, sha1, nowIso, clip } from './utils.js';
+import { tokenize, sha1 } from './utils.js';
 
 /**
  * Collect base knowledge from sessions: compactions + high-signal assistant messages.
@@ -74,14 +74,16 @@ export function collectBaseKnowledge(sessions, { limit = 20, query, provider } =
   return entries.slice(0, limit);
 }
 
-/**
- * Write knowledge entries to a temp file as formatted markdown.
- * Returns the absolute file path.
- */
-export function writeKnowledgeToFile(entries) {
-  const parts = [];
+export function renderHeuristicKnowledge(entries) {
+  if (!entries || entries.length === 0) {
+    return '';
+  }
+
+  const parts = ['# Live Heuristic Knowledge', ''];
   for (const entry of entries) {
-    parts.push(`## [${entry.provider}] ${entry.sessionId}`);
+    parts.push(
+      `## [${entry.provider}] ${entry.sessionId}#${entry.index} (${entry.type}${entry.timestamp ? `, ${entry.timestamp}` : ''})`,
+    );
     parts.push('');
     parts.push(entry.text);
     parts.push('');
@@ -89,11 +91,22 @@ export function writeKnowledgeToFile(entries) {
     parts.push('');
   }
 
-  const content = parts.join('\n');
+  return parts.join('\n').trim();
+}
+
+export function writeKnowledgeTextToFile(content) {
   const hash = sha1(content).slice(0, 8);
   const fileName = `chat-knowledge-${hash}.md`;
   const filePath = join(tmpdir(), fileName);
 
   writeFileSync(filePath, content, 'utf8');
   return filePath;
+}
+
+/**
+ * Write knowledge entries to a temp file as formatted markdown.
+ * Returns the absolute file path.
+ */
+export function writeKnowledgeToFile(entries) {
+  return writeKnowledgeTextToFile(renderHeuristicKnowledge(entries));
 }

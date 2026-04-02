@@ -197,7 +197,7 @@ test('MCP: initialize also works with legacy Content-Length framing', async () =
   }
 });
 
-test('MCP: tools/list returns 6 tools with correct names', async () => {
+test('MCP: tools/list returns 7 tools with correct names', async () => {
   const fixtures = setupTempFixtures();
   const proc = spawnMcp(fixtures);
 
@@ -225,12 +225,13 @@ test('MCP: tools/list returns 6 tools with correct names', async () => {
     assert.equal(response.id, 2);
     assert.ok(response.result, 'should have result');
     assert.ok(response.result.tools, 'should have tools array');
-    assert.equal(response.result.tools.length, 6, 'should have exactly 6 tools');
+    assert.equal(response.result.tools.length, 7, 'should have exactly 7 tools');
 
     const toolNames = response.result.tools.map((t) => t.name).sort();
     assert.deepEqual(toolNames, [
       'chat.base_knowledge',
       'chat.grep',
+      'chat.knowledge_index',
       'chat.list_sessions',
       'chat.read_lines',
       'chat.read_session',
@@ -282,6 +283,57 @@ test('MCP: tools/call chat.list_sessions returns session data', async () => {
       sessionIds.includes('claude-test-session'),
       'should include the Claude test session',
     );
+  } finally {
+    proc.kill();
+    fixtures.cleanup();
+  }
+});
+
+test('MCP: knowledge tools return disabled indexing state by default', async () => {
+  const fixtures = setupTempFixtures();
+  const proc = spawnMcp(fixtures);
+
+  try {
+    await sendRpc(proc, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'test', version: '1.0.0' },
+      },
+    });
+
+    const baseKnowledge = await sendRpc(proc, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'chat.base_knowledge',
+        arguments: {},
+      },
+    });
+
+    const indexKnowledge = await sendRpc(proc, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'chat.knowledge_index',
+        arguments: {},
+      },
+    });
+
+    const baseData = JSON.parse(baseKnowledge.result.content[0].text);
+    const indexData = JSON.parse(indexKnowledge.result.content[0].text);
+
+    assert.equal(baseData.indexing.enabled, false);
+    assert.ok(Array.isArray(baseData.heuristicEntries));
+    assert.ok(path.isAbsolute(baseData.heuristicsFilePath));
+    assert.ok(path.isAbsolute(baseData.combinedKnowledgeFilePath));
+    assert.equal(typeof baseData.message, 'string');
+    assert.equal(indexData.status, 'disabled');
   } finally {
     proc.kill();
     fixtures.cleanup();
