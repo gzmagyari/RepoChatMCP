@@ -149,9 +149,16 @@ If `--repo` is omitted, the current working directory is used.
 | `chat.grep` | Pattern search with `|`, `&`, and regex support |
 | `chat.read_session` | Reads messages from a session by index range |
 | `chat.read_lines` | Reads lines around a keyword or regex match |
-| `chat.base_knowledge` | Returns metadata plus absolute file paths for persisted indexed knowledge snapshots |
 | `chat.compaction_knowledge` | Returns metadata plus an absolute file path for live compaction knowledge |
-| `chat.knowledge_index` | Builds or refreshes persisted repository knowledge under `.repochatmcp/knowledge/` |
+| `chat.start_knowledge_index` | Starts async knowledge indexing and returns a job ID immediately |
+| `chat.get_knowledge_index_status` | Returns progress, counts, and terminal state for a knowledge indexing job |
+| `chat.cancel_knowledge_index` | Requests cancellation of a running knowledge indexing job |
+| `chat.list_knowledge_batches` | Lists persisted knowledge batches with canonical combined artifact paths |
+| `chat.read_latest_knowledge` | Reads paginated text from the latest persisted combined artifact |
+| `chat.read_knowledge_batch` | Reads paginated text from one persisted batch artifact |
+| `chat.list_knowledge_files` | Lists per-chunk persisted knowledge files for one batch |
+| `chat.read_knowledge_file` | Reads paginated text from one persisted per-chunk knowledge file |
+| `chat.search_knowledge` | Searches persisted knowledge artifacts directly |
 
 ### Example tool inputs
 
@@ -175,27 +182,43 @@ If `--repo` is omitted, the current working directory is used.
 { "provider": "codex", "limit": 10, "query": "database" }
 ```
 
+```json
+{ "jobId": "knowledge-job-20260403-080000000-abc123def0" }
+```
+
+```json
+{ "batchId": "20260403-080000000-abc123def0", "kind": "knowledge", "offset": 0, "limit": 120 }
+```
+
+```json
+{ "query": "billing webhook", "kind": "content_summary", "limit": 5 }
+```
+
 ## Optional Knowledge Indexing
 
 Knowledge indexing is disabled by default.
 
 When disabled:
 
-- `chat.base_knowledge` still returns persisted knowledge file paths if prior indexed runs already exist
 - `chat.compaction_knowledge` returns a live compaction snapshot file path
-- `chat.knowledge_index` returns a configuration message instead of indexing
+- `chat.start_knowledge_index` returns a configuration message instead of starting a job
+- persisted knowledge can still be read later if `.repochatmcp/knowledge/` already exists
 
 When enabled:
 
-- `chat.knowledge_index` summarizes new chat history into persisted markdown files
-- `chat.base_knowledge` returns absolute paths for the merged persisted snapshot and the persisted indexed run files
-- `chat.compaction_knowledge` returns absolute paths for live compaction-only knowledge
+- `chat.start_knowledge_index` creates an async indexing job instead of blocking the MCP call
+- `chat.get_knowledge_index_status` reports discovery counts, chunk progress, files written, and failures
+- `chat.read_latest_knowledge` and `chat.read_knowledge_batch` return actual paginated knowledge text, not just file paths
+- `chat.list_knowledge_files`, `chat.read_knowledge_file`, and `chat.search_knowledge` let agents inspect persisted chunk files directly
+- combined persisted batch artifacts are written under `.repochatmcp/knowledge/combined/`
 - `.repochatmcp/` is automatically added to the repo root `.gitignore`
 
 Stored files:
 
 - `.repochatmcp/knowledge/manifest.json`
+- `.repochatmcp/knowledge/jobs/*.json`
 - `.repochatmcp/knowledge/runs/*.md`
+- `.repochatmcp/knowledge/combined/*.md`
 
 Indexing rules:
 
@@ -203,6 +226,8 @@ Indexing rules:
 - split only when transcript size exceeds `CHAT_SEARCH_KNOWLEDGE_MAX_CHARS`
 - Codex chunk calls run sequentially
 - HTTP chunk calls run with limited concurrency
+- each chunk writes both a structured `knowledge` file and a plain `content_summary` file
+- combined batch artifacts are persisted so agents can read one canonical file per batch
 
 ### Backends
 
@@ -289,7 +314,7 @@ Configurable roots:
 npm test
 ```
 
-Current test suite: 57 tests covering discovery, normalization, search, MCP transport, live knowledge extraction, and persisted knowledge indexing.
+Current test suite: 79 tests covering discovery, normalization, search, MCP transport, async knowledge indexing jobs, direct persisted knowledge reads, and persisted knowledge indexing.
 
 ## License
 

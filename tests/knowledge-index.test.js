@@ -217,7 +217,7 @@ test('base knowledge: disabled mode still loads persisted knowledge runs from th
     assert.equal(result.indexing.enabled, false);
     assert.equal(result.indexedRuns.length, 1);
     assert.deepEqual(result.indexedKnowledgeFilePaths, [absolutePath]);
-    assert.match(result.indexing.message, /loaded 1 persisted knowledge run/i);
+    assert.match(result.indexing.message, /loaded 1 persisted knowledge file/i);
     assert.match(combinedText, /Persisted disabled-mode knowledge/);
     assert.doesNotMatch(combinedText, /Live Heuristic Knowledge/);
   }));
@@ -377,6 +377,32 @@ test('http knowledge: request body stays unchanged when no provider suffix is pr
     assert.equal('provider' in request.body, false);
   }));
 
+test('knowledge index: chunk prompt asks for chunk-local essential knowledge rather than generic boilerplate', () => {
+  const prompt = __private.buildChunkPrompt(
+    [
+      {
+        provider: 'claude',
+        sessionId: 'test-session',
+        index: 0,
+        timestamp: '2026-04-02T10:00:00.000Z',
+        type: 'assistant',
+        role: 'assistant',
+        text: 'Implemented MCP setup page and added /mcp route.',
+        metadata: {},
+      },
+    ],
+    {
+      repoPath: '/tmp/test-repo',
+      chunkIndex: 0,
+      chunkCount: 3,
+    },
+  );
+
+  assert.match(prompt, /THIS chunk is mainly about/i);
+  assert.match(prompt, /Do not repeat generic repo-wide boilerplate/i);
+  assert.match(prompt, /URLs, ports, features, architecture details, repository structure, flows, implementation decisions/i);
+});
+
 test('knowledge index: skips when fewer than 100 new messages exist', async () =>
   withTempRepo(async (repoPath) => {
     const config = makeConfig(repoPath, {
@@ -422,12 +448,13 @@ test('knowledge index: writes one persisted run when all pending messages fit in
     assert.equal(result.status, 'indexed');
     assert.equal(result.backend, 'http');
     assert.equal(result.chunkCount, 1);
-    assert.equal(result.filesWritten, 1);
+    assert.equal(result.filesWritten, 2);
     assert.equal(calls, 1);
+    assert.equal(result.filePaths.length, 2);
     assert.deepEqual(result.providersIndexed, ['claude']);
     assert.deepEqual(result.sessionCountsByProvider, { claude: 1 });
     assert.deepEqual(result.messageCountsByProvider, { claude: 120 });
-    assert.equal(manifest.runs.length, 1);
+    assert.equal(manifest.runs.length, 2);
     assert.equal(Object.keys(manifest.indexedMessages).length, 120);
     assert.ok(fs.existsSync(result.filePath));
     assert.equal(result.gitignorePath, path.join(repoPath, '.gitignore'));
@@ -460,6 +487,8 @@ test('knowledge index: retries smaller HTTP chunks when a large summary comes ba
     assert.equal(result.status, 'indexed');
     assert.equal(result.retriedForEmptySummary, true);
     assert.ok(result.chunkCount > 1);
+    assert.equal(result.filesWritten, result.chunkCount * 2);
+    assert.equal(result.filePaths.length, result.chunkCount * 2);
     assert.ok(calls >= 3);
     assert.match(storedText, /Overview retry-/);
   }));
@@ -511,7 +540,7 @@ test('knowledge index: appends .repochatmcp to existing .gitignore without dupli
     assert.equal(matches.length, 1);
   }));
 
-test('knowledge index: splits oversized input and merges it into one persisted run', async () =>
+test('knowledge index: splits oversized input into multiple persisted knowledge files', async () =>
   withTempRepo(async (repoPath) => {
     const config = makeConfig(repoPath, {
       backend: 'http',
@@ -521,32 +550,28 @@ test('knowledge index: splits oversized input and merges it into one persisted r
     });
     const session = makeSession({ count: 120, textSize: 260 });
     let chunkCalls = 0;
-    let mergeCalls = 0;
 
     const result = await runKnowledgeIndex([session], config, {}, {
-      invokeHttpSummary: async (prompt) => {
-        if (prompt.includes('Partial summaries JSON:')) {
-          mergeCalls++;
-          return summaryFor('merged');
-        }
-
+      invokeHttpSummary: async () => {
         chunkCalls++;
         return summaryFor(`chunk-${chunkCalls}`);
       },
     });
 
     const manifest = loadKnowledgeManifest(config);
-    const storedText = fs.readFileSync(result.filePath, 'utf8');
+    const storedTexts = result.filePaths.map((filePath) => fs.readFileSync(filePath, 'utf8'));
 
     assert.equal(result.status, 'indexed');
     assert.ok(result.chunkCount > 1);
-    assert.equal(mergeCalls, 1);
-    assert.equal(manifest.runs.length, 1);
-    assert.match(storedText, /Overview merged/);
+    assert.equal(result.filesWritten, result.chunkCount * 2);
+    assert.equal(manifest.runs.length, result.chunkCount * 2);
+    assert.equal(result.filePaths.length, result.chunkCount * 2);
+    assert.ok(storedTexts.some((text) => /# Repository Knowledge Summary/.test(text)));
+    assert.ok(storedTexts.some((text) => /# Repository Chunk Summary/.test(text)));
     assert.ok(chunkCalls >= 2);
   }));
 
-test('knowledge index: falls back to deterministic merge when merge summary is empty', async () =>
+test('knowledge index: adaptive split persists multiple files when the top-level HTTP summary is empty', async () =>
   withTempRepo(async (repoPath) => {
     const config = makeConfig(repoPath, {
       backend: 'http',
@@ -555,24 +580,24 @@ test('knowledge index: falls back to deterministic merge when merge summary is e
       maxChars: 3500,
     });
     const session = makeSession({ count: 120, textSize: 260 });
-    let mergeCalls = 0;
+    let calls = 0;
 
     const result = await runKnowledgeIndex([session], config, {}, {
       invokeHttpSummary: async (prompt) => {
-        if (prompt.includes('Partial summaries JSON:')) {
-          mergeCalls++;
+        calls++;
+        if (calls === 1) {
           return {};
         }
-        return summaryFor(`chunk-${mergeCalls + 1}`);
+        return summaryFor(`chunk-${calls}`);
       },
     });
 
-    const storedText = fs.readFileSync(result.filePath, 'utf8');
+    const storedTexts = result.filePaths.map((filePath) => fs.readFileSync(filePath, 'utf8'));
 
     assert.equal(result.status, 'indexed');
-    assert.equal(mergeCalls, 1);
-    assert.match(storedText, /Overview chunk-1/);
-    assert.match(storedText, /Architecture chunk-1/);
+    assert.ok(result.chunkCount > 1);
+    assert.equal(result.filesWritten, result.chunkCount * 2);
+    assert.ok(storedTexts.some((text) => /Overview chunk-/.test(text)));
   }));
 
 test('knowledge index: returns real provider composition when indexing multiple providers', async () =>
@@ -690,7 +715,7 @@ test('knowledge index: unchanged messages stay cached but changed messages re-en
     assert.equal(second.pendingMessages, 0);
     assert.equal(third.status, 'indexed');
     assert.equal(third.newMessages, 120);
-    assert.equal(manifest.runs.length, 1);
+    assert.equal(manifest.runs.length, 2);
   }));
 
 test('knowledge index: force rebuild removes the previous persisted run file', async () =>
@@ -720,8 +745,8 @@ test('knowledge index: force rebuild removes the previous persisted run file', a
     assert.equal(second.status, 'indexed');
     assert.equal(fs.existsSync(second.filePath), true);
     assert.equal(fs.existsSync(firstPath), false);
-    assert.equal(manifest.runs.length, 1);
-    assert.equal(manifest.runs[0].id, second.runId);
+    assert.equal(manifest.runs.length, 2);
+    assert.equal(manifest.runs[0].batchId, second.batchId);
   }));
 
 test('knowledge index: removes orphaned run files that are not referenced by the manifest', async () =>

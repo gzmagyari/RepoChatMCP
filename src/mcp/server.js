@@ -4,11 +4,19 @@ import { discoverSessionFiles } from '../discovery.js';
 import { normalizeSession } from '../normalizer.js';
 import { searchMessages, grepMessages, readSession, readLines } from '../search.js';
 import {
-  buildBaseKnowledgeResponse,
   buildCompactionKnowledgeResponse,
-  flattenMessages,
-  runKnowledgeIndex,
 } from '../knowledge-index.js';
+import {
+  cancelKnowledgeIndex,
+  getKnowledgeIndexStatus,
+  listKnowledgeBatches,
+  listKnowledgeFiles,
+  readKnowledgeBatch,
+  readKnowledgeFile,
+  readLatestKnowledge,
+  searchKnowledge,
+  startKnowledgeIndex,
+} from '../knowledge-access.js';
 
 export const SUPPORTED_PROTOCOL_VERSIONS = [
   '2025-06-18',
@@ -18,7 +26,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [
 
 export const SERVER_INFO = {
   name: 'chat-search',
-  version: '0.1.8',
+  version: '0.1.11',
 };
 
 export function negotiateProtocolVersion(requestedVersion) {
@@ -97,37 +105,42 @@ function loadSessions(sessionFiles, cache) {
   return sessions;
 }
 
-function countByProvider(items) {
-  const counts = {};
-  for (const item of items) {
-    const provider = item?.provider;
-    if (!provider) continue;
-    counts[provider] = (counts[provider] || 0) + 1;
+class ToolPayloadError extends Error {
+  constructor(payload) {
+    super(payload?.message || 'Tool call failed.');
+    this.name = 'ToolPayloadError';
+    this.payload = payload;
   }
-  return counts;
 }
 
-function buildKnowledgeIndexToolError(err, sessions, params, config) {
-  const providerFilter = params.provider || null;
-  const messages = flattenMessages(sessions, { provider: providerFilter });
-  const providersIndexed = [...new Set(messages.map((message) => message.provider).filter(Boolean))].sort();
+function buildDeprecatedKnowledgeToolPayload(name) {
+  if (name === 'chat.knowledge_index') {
+    return {
+      status: 'deprecated',
+      tool: name,
+      replacements: [
+        'chat.start_knowledge_index',
+        'chat.get_knowledge_index_status',
+        'chat.cancel_knowledge_index',
+      ],
+      message:
+        'chat.knowledge_index has been replaced by async job tools: chat.start_knowledge_index, chat.get_knowledge_index_status, and chat.cancel_knowledge_index.',
+    };
+  }
 
   return {
-    status: 'error',
-    backend: config.knowledge?.backend || 'off',
-    providerFilter,
-    providersIndexed,
-    sessionCountsByProvider: countByProvider(sessions),
-    messageCountsByProvider: countByProvider(messages),
-    messagesSeen: messages.length,
-    newMessages: 0,
-    pendingMessages: messages.length,
-    filesWritten: 0,
-    message: `Knowledge indexing failed: ${err.message}`,
-    error: {
-      type: err?.name || 'Error',
-      message: err?.message || 'Unknown knowledge indexing error.',
-    },
+    status: 'deprecated',
+    tool: name,
+    replacements: [
+      'chat.list_knowledge_batches',
+      'chat.read_latest_knowledge',
+      'chat.read_knowledge_batch',
+      'chat.list_knowledge_files',
+      'chat.read_knowledge_file',
+      'chat.search_knowledge',
+    ],
+    message:
+      'chat.base_knowledge has been replaced by direct knowledge read tools: chat.list_knowledge_batches, chat.read_latest_knowledge, chat.read_knowledge_batch, chat.list_knowledge_files, chat.read_knowledge_file, and chat.search_knowledge.',
   };
 }
 
@@ -213,16 +226,6 @@ const TOOLS = [
     },
   },
   {
-    name: 'chat.base_knowledge',
-    description: 'Collect persisted repository knowledge metadata and return absolute file paths for indexed knowledge snapshots.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        provider: { type: 'string', description: 'Filter by provider: claude or codex' },
-      },
-    },
-  },
-  {
     name: 'chat.compaction_knowledge',
     description: 'Collect live compaction knowledge metadata and return an absolute file path for the compaction snapshot.',
     inputSchema: {
@@ -235,13 +238,111 @@ const TOOLS = [
     },
   },
   {
-    name: 'chat.knowledge_index',
-    description: 'Build or refresh the persisted repository knowledge index from all chat history.',
+    name: 'chat.start_knowledge_index',
+    description: 'Start repository knowledge indexing as an async job and return immediately with a job ID.',
     inputSchema: {
       type: 'object',
       properties: {
         provider: { type: 'string', description: 'Optional narrowing filter: claude or codex. Omit to index both providers.' },
         force: { type: 'boolean', description: 'Force a full rebuild of the persisted knowledge index' },
+      },
+    },
+  },
+  {
+    name: 'chat.get_knowledge_index_status',
+    description: 'Get the status and progress of an async repository knowledge indexing job.',
+    inputSchema: {
+      type: 'object',
+      required: ['jobId'],
+      properties: {
+        jobId: { type: 'string', description: 'Knowledge indexing job ID' },
+      },
+    },
+  },
+  {
+    name: 'chat.cancel_knowledge_index',
+    description: 'Request cancellation of an async repository knowledge indexing job.',
+    inputSchema: {
+      type: 'object',
+      required: ['jobId'],
+      properties: {
+        jobId: { type: 'string', description: 'Knowledge indexing job ID' },
+      },
+    },
+  },
+  {
+    name: 'chat.list_knowledge_batches',
+    description: 'List persisted knowledge batches with canonical combined artifact information.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max batches to return (default 20)' },
+        provider: { type: 'string', description: 'Filter batches that include claude or codex knowledge' },
+      },
+    },
+  },
+  {
+    name: 'chat.read_latest_knowledge',
+    description: 'Read paginated text from the latest persisted combined knowledge artifact.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', description: 'combined, knowledge, or content_summary' },
+        offset: { type: 'number', description: '0-based line offset' },
+        limit: { type: 'number', description: 'Max lines to return (default 200, max 300)' },
+      },
+    },
+  },
+  {
+    name: 'chat.read_knowledge_batch',
+    description: 'Read paginated text from a specific persisted knowledge batch artifact.',
+    inputSchema: {
+      type: 'object',
+      required: ['batchId'],
+      properties: {
+        batchId: { type: 'string', description: 'Knowledge batch ID' },
+        kind: { type: 'string', description: 'combined, knowledge, or content_summary' },
+        offset: { type: 'number', description: '0-based line offset' },
+        limit: { type: 'number', description: 'Max lines to return (default 200, max 300)' },
+      },
+    },
+  },
+  {
+    name: 'chat.list_knowledge_files',
+    description: 'List persisted per-chunk knowledge files for a specific batch.',
+    inputSchema: {
+      type: 'object',
+      required: ['batchId'],
+      properties: {
+        batchId: { type: 'string', description: 'Knowledge batch ID' },
+        kind: { type: 'string', description: 'knowledge or content_summary' },
+      },
+    },
+  },
+  {
+    name: 'chat.read_knowledge_file',
+    description: 'Read paginated text from a specific persisted per-chunk knowledge file.',
+    inputSchema: {
+      type: 'object',
+      required: ['runId'],
+      properties: {
+        runId: { type: 'string', description: 'Persisted knowledge run ID' },
+        offset: { type: 'number', description: '0-based line offset' },
+        limit: { type: 'number', description: 'Max lines to return (default 200, max 300)' },
+      },
+    },
+  },
+  {
+    name: 'chat.search_knowledge',
+    description: 'Search persisted knowledge artifacts directly and return snippet matches.',
+    inputSchema: {
+      type: 'object',
+      required: ['query'],
+      properties: {
+        query: { type: 'string', description: 'Search query text' },
+        batchId: { type: 'string', description: 'Optional batch ID filter' },
+        kind: { type: 'string', description: 'combined, knowledge, or content_summary' },
+        limit: { type: 'number', description: 'Max matches to return (default 20)' },
       },
     },
   },
@@ -335,13 +436,6 @@ export function createMcpRequestHandler(config) {
         });
       }
 
-      case 'chat.base_knowledge': {
-        const sessions = getSessions(params.provider);
-        return buildBaseKnowledgeResponse(sessions, config, {
-          provider: params.provider,
-        });
-      }
-
       case 'chat.compaction_knowledge': {
         const sessions = getSessions(params.provider);
         return buildCompactionKnowledgeResponse(sessions, config, {
@@ -351,16 +445,69 @@ export function createMcpRequestHandler(config) {
         });
       }
 
-      case 'chat.knowledge_index': {
+      case 'chat.start_knowledge_index': {
         const sessions = getSessions(params.provider);
-        try {
-          return await runKnowledgeIndex(sessions, config, {
-            provider: params.provider,
-            force: params.force === true,
-          });
-        } catch (err) {
-          return buildKnowledgeIndexToolError(err, sessions, params, config);
-        }
+        return startKnowledgeIndex(sessions, config, {
+          provider: params.provider,
+          force: params.force === true,
+        });
+      }
+
+      case 'chat.get_knowledge_index_status':
+        return getKnowledgeIndexStatus(config, {
+          jobId: params.jobId,
+        });
+
+      case 'chat.cancel_knowledge_index':
+        return cancelKnowledgeIndex(config, {
+          jobId: params.jobId,
+        });
+
+      case 'chat.list_knowledge_batches':
+        return listKnowledgeBatches(config, {
+          limit: params.limit,
+          provider: params.provider,
+        });
+
+      case 'chat.read_latest_knowledge':
+        return readLatestKnowledge(config, {
+          kind: params.kind,
+          offset: params.offset,
+          limit: params.limit,
+        });
+
+      case 'chat.read_knowledge_batch':
+        return readKnowledgeBatch(config, {
+          batchId: params.batchId,
+          kind: params.kind,
+          offset: params.offset,
+          limit: params.limit,
+        });
+
+      case 'chat.list_knowledge_files':
+        return listKnowledgeFiles(config, {
+          batchId: params.batchId,
+          kind: params.kind,
+        });
+
+      case 'chat.read_knowledge_file':
+        return readKnowledgeFile(config, {
+          runId: params.runId,
+          offset: params.offset,
+          limit: params.limit,
+        });
+
+      case 'chat.search_knowledge':
+        return searchKnowledge(config, {
+          query: params.query,
+          batchId: params.batchId,
+          kind: params.kind,
+          limit: params.limit,
+        });
+
+      case 'chat.base_knowledge':
+      case 'chat.knowledge_index': {
+        throw new ToolPayloadError(buildDeprecatedKnowledgeToolPayload(name));
       }
 
       default:
@@ -401,6 +548,12 @@ export function createMcpRequestHandler(config) {
           isError: false,
         };
       } catch (err) {
+        if (err instanceof ToolPayloadError) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify(err.payload, null, 2) }],
+            isError: true,
+          };
+        }
         return {
           content: [{ type: 'text', text: `Error: ${err.message}` }],
           isError: true,

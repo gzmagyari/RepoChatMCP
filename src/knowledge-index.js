@@ -235,22 +235,26 @@ export function splitMessagesByChars(messages, maxChars) {
 function buildChunkPrompt(messages, { repoPath, chunkIndex, chunkCount }) {
   return [
     'You are extracting durable repository knowledge from chat transcripts.',
+    'This is a chunk-local extraction task: summarize what THIS chunk is mainly about and extract only the essential facts supported by this chunk.',
     'Focus only on repository-relevant facts that future coding agents need.',
+    'Prefer concrete facts such as app URLs, ports, features, architecture details, repository structure, flows, implementation decisions, constraints, bugs, fixes, and next steps.',
     'Ignore chatter, repeated retries, and noisy logs unless they reveal an important constraint.',
+    'Do not repeat generic repo-wide boilerplate in every chunk unless it is clearly central to this chunk.',
+    'If a section has no strong chunk-local evidence, leave it empty instead of inventing broad filler.',
     'Return JSON only. Keep every bullet short and high signal.',
     '',
     `Repository path: ${repoPath}`,
     `Chunk: ${chunkIndex + 1} of ${chunkCount}`,
     '',
     'JSON schema fields:',
-    '- repositoryOverview: one concise paragraph string',
-    '- architectureServices: short bullet strings',
-    '- importantUrlsPorts: short bullet strings',
-    '- repoStructure: short bullet strings',
-    '- implementedWork: short bullet strings',
-    '- rulesConstraints: short bullet strings',
-    '- currentState: short bullet strings',
-    '- openIssuesNextSteps: short bullet strings',
+    '- repositoryOverview: one concise paragraph about what this chunk is mainly about and why it matters',
+    '- architectureServices: short bullet strings for concrete architecture/services discussed in this chunk',
+    '- importantUrlsPorts: short bullet strings for URLs, domains, endpoints, ports, routing, env-driven URLs seen in this chunk',
+    '- repoStructure: short bullet strings for concrete files, folders, modules, or services mentioned in this chunk',
+    '- implementedWork: short bullet strings for what was implemented, changed, fixed, or added in this chunk',
+    '- rulesConstraints: short bullet strings for rules, constraints, conventions, auth rules, deployment requirements, or caveats from this chunk',
+    '- currentState: short bullet strings for current progress, status, partially-complete work, or verified behavior in this chunk',
+    '- openIssuesNextSteps: short bullet strings for unresolved issues, TODOs, follow-ups, or planned next actions from this chunk',
     '',
     'Transcript:',
     serializeTranscript(messages),
@@ -261,12 +265,30 @@ function buildMergePrompt(summaries, { repoPath }) {
   return [
     'You are merging partial repository knowledge summaries into one final repository memory.',
     'Deduplicate aggressively and keep only durable, high-signal information.',
+    'Preserve chunk-specific information and avoid collapsing everything into generic boilerplate.',
     'Return JSON only and preserve the same schema.',
     '',
     `Repository path: ${repoPath}`,
     '',
     'Partial summaries JSON:',
     JSON.stringify(summaries, null, 2),
+  ].join('\n');
+}
+
+function buildChunkContentSummaryPrompt(messages, { repoPath, chunkIndex, chunkCount }) {
+  return [
+    'You are summarizing a chunk of coding chat transcripts for future repository work.',
+    'Summarize what THIS chunk is about in concise markdown.',
+    'Keep it grounded in the provided chunk only.',
+    'Capture the main topic, important features or flows, concrete decisions, URLs or ports, notable files/modules, rules or constraints, current status, and next steps when present.',
+    'Do not force all categories if the chunk is narrow. Do not repeat generic repo boilerplate.',
+    'The goal is a useful human/agent summary of this chunk, not a schema extraction.',
+    '',
+    `Repository path: ${repoPath}`,
+    `Chunk: ${chunkIndex + 1} of ${chunkCount}`,
+    '',
+    'Transcript:',
+    serializeTranscript(messages),
   ].join('\n');
 }
 
@@ -378,8 +400,14 @@ export function renderKnowledgeSummary(summary, metadata = {}) {
   const normalized = normalizeSummary(summary);
   const lines = ['# Repository Knowledge Summary', ''];
 
+  if (metadata.batchId) {
+    lines.push(`Batch ID: ${metadata.batchId}`);
+  }
   if (metadata.runId) {
     lines.push(`Run ID: ${metadata.runId}`);
+  }
+  if (metadata.chunkIndex !== undefined && metadata.batchChunkCount !== undefined) {
+    lines.push(`Chunk: ${metadata.chunkIndex} of ${metadata.batchChunkCount}`);
   }
   if (metadata.createdAt) {
     lines.push(`Created: ${metadata.createdAt}`);
@@ -413,6 +441,35 @@ export function renderKnowledgeSummary(summary, metadata = {}) {
   return `${lines.join('\n').trim()}\n`;
 }
 
+function renderContentSummary(text, metadata = {}) {
+  const lines = ['# Repository Chunk Summary', ''];
+
+  if (metadata.batchId) {
+    lines.push(`Batch ID: ${metadata.batchId}`);
+  }
+  if (metadata.runId) {
+    lines.push(`Run ID: ${metadata.runId}`);
+  }
+  if (metadata.chunkIndex !== undefined && metadata.batchChunkCount !== undefined) {
+    lines.push(`Chunk: ${metadata.chunkIndex} of ${metadata.batchChunkCount}`);
+  }
+  if (metadata.createdAt) {
+    lines.push(`Created: ${metadata.createdAt}`);
+  }
+  if (metadata.backend) {
+    lines.push(`Backend: ${metadata.backend}`);
+  }
+  if (metadata.messageCount !== undefined) {
+    lines.push(`Messages indexed: ${metadata.messageCount}`);
+  }
+  if (lines.length > 2) {
+    lines.push('');
+  }
+
+  lines.push(`${`${text || ''}`.trim() || 'No content summary extracted.'}`);
+  return `${lines.join('\n').trim()}\n`;
+}
+
 function buildKnowledgeRunId(messages, timestamp) {
   const firstId = messages[0] ? getMessageCacheKey(messages[0]) : 'empty';
   const lastId = messages[messages.length - 1] ? getMessageCacheKey(messages[messages.length - 1]) : 'empty';
@@ -420,8 +477,14 @@ function buildKnowledgeRunId(messages, timestamp) {
   return `${compactTimestamp}-${sha1(`${firstId}:${lastId}:${messages.length}`).slice(0, 10)}`;
 }
 
-function relativeRunPath(runId) {
-  return join('runs', `knowledge-${runId}.md`);
+function buildKnowledgeChunkRunId(messages, timestamp, batchId, chunkIndex) {
+  const firstId = messages[0] ? getMessageCacheKey(messages[0]) : 'empty';
+  const lastId = messages[messages.length - 1] ? getMessageCacheKey(messages[messages.length - 1]) : 'empty';
+  return `${buildKnowledgeRunId(messages, timestamp)}-${sha1(`${batchId}:${chunkIndex}:${firstId}:${lastId}`).slice(0, 6)}`;
+}
+
+function relativeRunPath(runId, kind = 'knowledge') {
+  return join('runs', `${kind === 'content_summary' ? 'summary' : 'knowledge'}-${runId}.md`);
 }
 
 function readTextIfExists(filePath) {
@@ -448,7 +511,7 @@ function cleanupUnreferencedRunFiles(config, activeRuns) {
 
   for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
-    if (!/^knowledge-.*\.md$/i.test(entry.name)) continue;
+    if (!/^(knowledge|summary)-.*\.md$/i.test(entry.name)) continue;
 
     const absolutePath = join(runsDir, entry.name);
     if (!referenced.has(absolutePath) && fileExists(absolutePath)) {
@@ -627,7 +690,7 @@ async function invokeHttpSummary(prompt, config, dependencies = {}) {
         {
           role: 'system',
           content:
-            'You extract durable repository knowledge from coding chat logs. Return JSON only and keep it concise.',
+            'You extract durable repository knowledge from coding chat logs. Keep summaries grounded in the provided chunk, avoid generic boilerplate, and return JSON only.',
         },
         {
           role: 'user',
@@ -671,6 +734,79 @@ async function invokeHttpSummary(prompt, config, dependencies = {}) {
     }
 
     return normalizeSummary(summary);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function invokeHttpTextSummary(prompt, config, dependencies = {}) {
+  const fetchImpl = dependencies.fetch || globalThis.fetch;
+  if (!fetchImpl) {
+    throw new Error('Global fetch is not available for HTTP knowledge indexing.');
+  }
+
+  const endpoint = getHttpEndpoint(config.knowledge.baseUrl);
+  const { baseModel, provider } = parseProviderPinnedModel(config.knowledge.model);
+  if (provider && !isOpenRouterBaseUrl(config.knowledge.baseUrl)) {
+    throw new Error(
+      'OpenRouter provider pinning via "@provider" requires CHAT_SEARCH_KNOWLEDGE_BASE_URL to point to OpenRouter.',
+    );
+  }
+
+  const timeoutMs = config.knowledge.timeoutMs || 120000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const requestBody = {
+      model: baseModel,
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You summarize coding chat transcripts into concise markdown. Keep it grounded in the provided chunk and avoid generic repo boilerplate.',
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+    };
+
+    if (provider) {
+      requestBody.provider = {
+        order: [provider],
+        allow_fallbacks: false,
+        require_parameters: true,
+      };
+    }
+
+    const response = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.knowledge.apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP knowledge request failed (${response.status}): ${clip(raw, 500)}`);
+    }
+
+    const parsed = JSON.parse(raw);
+    const content = parsed?.choices?.[0]?.message?.content;
+    const text = Array.isArray(content)
+      ? content.map((item) => item?.text || '').join('\n')
+      : `${content || ''}`;
+    const trimmed = text.trim();
+    if (!trimmed) {
+      throw new Error('HTTP knowledge text summary response was empty.');
+    }
+    return trimmed;
   } finally {
     clearTimeout(timeout);
   }
@@ -721,6 +857,47 @@ async function invokeCodexSummary(prompt, config, dependencies = {}) {
   }
 
   return normalizeSummary(summary);
+}
+
+async function invokeCodexTextSummary(prompt, config, dependencies = {}) {
+  const runCommand = dependencies.runCommand || runCommandCapture;
+  const command = config.knowledge?.codexBin || 'codex';
+  const outputFile = join(tmpdir(), `repochatmcp-codex-summary-${sha1(prompt).slice(0, 10)}.md`);
+
+  const args = [
+    'exec',
+    '--cd',
+    config.repoPath,
+    '--sandbox',
+    'read-only',
+    '--color',
+    'never',
+    '--output-last-message',
+    outputFile,
+  ];
+
+  if (config.knowledge?.model) {
+    args.push('--model', config.knowledge.model);
+  }
+
+  args.push('-');
+
+  const result = await runCommand(command, args, {
+    cwd: config.repoPath,
+    timeoutMs: config.knowledge?.timeoutMs || 120000,
+    input: prompt,
+  });
+
+  const rawOutput = readTextIfExists(outputFile) || result.stdout;
+  if (result.code !== 0 && !rawOutput) {
+    throw new Error(`Codex knowledge summary failed: ${clip(result.stderr || result.stdout, 500)}`);
+  }
+
+  const trimmed = `${rawOutput || ''}`.trim();
+  if (!trimmed) {
+    throw new Error('Codex knowledge text summary response was empty.');
+  }
+  return trimmed;
 }
 
 async function resolveEffectiveBackend(config, dependencies = {}) {
@@ -786,6 +963,44 @@ async function summarizeChunk(prompt, effectiveBackend, config, dependencies) {
   return invokeCodexSummary(prompt, config, dependencies);
 }
 
+function fallbackContentSummaryFromStructuredSummary(summary) {
+  return renderKnowledgeSummary(summary).trim();
+}
+
+async function summarizeChunkContent(messages, summary, options) {
+  const {
+    repoPath,
+    effectiveBackend,
+    config,
+    dependencies,
+    chunkIndex,
+    chunkCount,
+  } = options;
+  const prompt = buildChunkContentSummaryPrompt(messages, {
+    repoPath,
+    chunkIndex,
+    chunkCount,
+  });
+
+  if (effectiveBackend.backend === 'http') {
+    if (dependencies.invokeHttpTextSummary) {
+      return `${await dependencies.invokeHttpTextSummary(prompt, config, dependencies)}`.trim();
+    }
+    if (dependencies.invokeHttpSummary) {
+      return fallbackContentSummaryFromStructuredSummary(summary);
+    }
+    return invokeHttpTextSummary(prompt, config, dependencies);
+  }
+
+  if (dependencies.invokeCodexTextSummary) {
+    return `${await dependencies.invokeCodexTextSummary(prompt, config, dependencies)}`.trim();
+  }
+  if (dependencies.invokeCodexSummary) {
+    return fallbackContentSummaryFromStructuredSummary(summary);
+  }
+  return invokeCodexTextSummary(prompt, config, dependencies);
+}
+
 async function summarizeMessagesAdaptive(
   messages,
   {
@@ -806,7 +1021,10 @@ async function summarizeMessagesAdaptive(
   const summary = await summarizeChunk(prompt, effectiveBackend, config, dependencies);
   if (summaryHasContent(summary)) {
     return {
-      summaries: [normalizeSummary(summary)],
+      leafResults: [{
+        messages,
+        summary: normalizeSummary(summary),
+      }],
       leafChunkCount: 1,
       retriedForEmptySummary: false,
     };
@@ -814,7 +1032,7 @@ async function summarizeMessagesAdaptive(
 
   if (messages.length <= minSplitMessages) {
     return {
-      summaries: [],
+      leafResults: [],
       leafChunkCount: 1,
       retriedForEmptySummary: false,
     };
@@ -841,18 +1059,19 @@ async function summarizeMessagesAdaptive(
   });
 
   return {
-    summaries: [...left.summaries, ...right.summaries],
+    leafResults: [...left.leafResults, ...right.leafResults],
     leafChunkCount: left.leafChunkCount + right.leafChunkCount,
     retriedForEmptySummary: true,
   };
 }
 
-async function mapWithConcurrency(items, concurrency, mapper) {
+async function mapWithConcurrency(items, concurrency, mapper, shouldStop = () => false) {
   const results = new Array(items.length);
   let nextIndex = 0;
 
   async function worker() {
     while (true) {
+      if (shouldStop()) return;
       const index = nextIndex++;
       if (index >= items.length) return;
       results[index] = await mapper(items[index], index);
@@ -882,37 +1101,45 @@ function collectPendingMessages(messages, manifest, force = false) {
   if (force) {
     return {
       pendingMessages: messages,
-      invalidRunIds: new Set(manifest.runs.map((run) => run.id)),
+      invalidGroupIds: new Set(manifest.runs.map((run) => run.groupId || run.id)),
     };
   }
 
-  const invalidRunIds = new Set();
+  const invalidGroupIds = new Set();
 
   for (const message of messages) {
     const key = getMessageCacheKey(message);
     const entry = manifest.indexedMessages[key];
     if (entry && entry.hash !== getMessageCacheHash(message)) {
-      invalidRunIds.add(entry.runId);
+      invalidGroupIds.add(entry.groupId || entry.runId);
     }
   }
 
-  const runMessageIds = new Map(
-    manifest.runs.map((run) => [run.id, new Set(run.messageIds || [])]),
-  );
+  const runMessageIds = new Map();
+  for (const run of manifest.runs) {
+    const groupId = run.groupId || run.id;
+    if (!runMessageIds.has(groupId)) {
+      runMessageIds.set(groupId, new Set());
+    }
+    for (const messageId of run.messageIds || []) {
+      runMessageIds.get(groupId).add(messageId);
+    }
+  }
 
   const pendingMessages = messages.filter((message) => {
     const key = getMessageCacheKey(message);
     const entry = manifest.indexedMessages[key];
     if (!entry) return true;
-    if (invalidRunIds.has(entry.runId)) {
-      return runMessageIds.get(entry.runId)?.has(key) ?? true;
+    const groupId = entry.groupId || entry.runId;
+    if (invalidGroupIds.has(groupId)) {
+      return runMessageIds.get(groupId)?.has(key) ?? true;
     }
     return false;
   });
 
   return {
     pendingMessages,
-    invalidRunIds,
+    invalidGroupIds,
   };
 }
 
@@ -920,6 +1147,11 @@ function activeRunsForOutput(config, manifest, provider) {
   return manifest.runs
     .filter((run) => !provider || run.provider === null || run.provider === provider)
     .sort((left, right) => {
+      const leftFirst = left.firstMessageTs || '';
+      const rightFirst = right.firstMessageTs || '';
+      if (leftFirst !== rightFirst) {
+        return leftFirst.localeCompare(rightFirst);
+      }
       if (left.createdAt !== right.createdAt) {
         return left.createdAt.localeCompare(right.createdAt);
       }
@@ -927,8 +1159,13 @@ function activeRunsForOutput(config, manifest, provider) {
     })
     .map((run) => ({
       id: run.id,
+      groupId: run.groupId || null,
+      batchId: run.batchId || null,
+      chunkIndex: run.chunkIndex || null,
+      batchChunkCount: run.batchChunkCount || null,
       createdAt: run.createdAt,
       backend: run.backend,
+      kind: run.kind || 'knowledge',
       provider: run.provider,
       providersIndexed: Array.isArray(run.providersIndexed) ? run.providersIndexed : null,
       sessionCountsByProvider: run.sessionCountsByProvider || null,
@@ -988,6 +1225,20 @@ function countMessagesByProvider(messages) {
   return counts;
 }
 
+function reportKnowledgeProgress(dependencies, patch) {
+  if (typeof dependencies.onProgress === 'function') {
+    dependencies.onProgress(patch);
+  }
+}
+
+function assertKnowledgeNotCancelled(dependencies) {
+  if (typeof dependencies.isCancelled === 'function' && dependencies.isCancelled()) {
+    const error = new Error('Knowledge indexing was canceled.');
+    error.name = 'KnowledgeJobCancelledError';
+    throw error;
+  }
+}
+
 function ensureKnowledgeSnapshotText(title, body, emptyMessage) {
   const trimmed = `${body || ''}`.trim();
   if (trimmed) return trimmed;
@@ -1043,10 +1294,10 @@ export function buildBaseKnowledgeResponse(sessions, config, params = {}) {
         'Knowledge indexing is enabled, but no persisted knowledge files exist yet. Run chat.knowledge_index to build them.';
     }
   } else if (knowledgeEnabled(config)) {
-    indexing.message = `Loaded ${indexedRuns.length} persisted knowledge run(s).`;
+    indexing.message = `Loaded ${indexedRuns.length} persisted knowledge file(s).`;
   } else {
     indexing.message =
-      `Knowledge indexing is disabled for new indexing, but loaded ${indexedRuns.length} persisted knowledge run(s).`;
+      `Knowledge indexing is disabled for new indexing, but loaded ${indexedRuns.length} persisted knowledge file(s).`;
   }
 
   const combinedKnowledgeText = buildCombinedKnowledgeSnapshot({
@@ -1120,7 +1371,21 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
   const messageCountsByProvider = countMessagesByProvider(messages);
   const providersIndexed = Object.keys(messageCountsByProvider).sort();
   const manifest = loadKnowledgeManifest(config);
-  const { pendingMessages, invalidRunIds } = collectPendingMessages(messages, manifest, force);
+  const { pendingMessages, invalidGroupIds } = collectPendingMessages(messages, manifest, force);
+
+  reportKnowledgeProgress(dependencies, {
+    currentPhase: 'discovered',
+    messagesSeen: messages.length,
+    newMessages: pendingMessages.length,
+    pendingMessages: pendingMessages.length,
+    plannedChunkGroups: 0,
+    completedChunkGroups: 0,
+    filesWritten: 0,
+    providersIndexed,
+    sessionCountsByProvider,
+    messageCountsByProvider,
+  });
+  assertKnowledgeNotCancelled(dependencies);
 
   if (pendingMessages.length === 0) {
     const gitignorePath = ensureKnowledgeGitignore(config);
@@ -1162,6 +1427,15 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
   const gitignorePath = ensureKnowledgeGitignore(config);
   const maxChars = Math.max(1, config.knowledge?.maxChars || 500000);
   const chunks = splitMessagesByChars(pendingMessages, maxChars);
+  reportKnowledgeProgress(dependencies, {
+    currentPhase: 'summarizing_knowledge',
+    backend: effectiveBackend.backend,
+    pendingMessages: pendingMessages.length,
+    plannedChunkGroups: chunks.length,
+    completedChunkGroups: 0,
+    filesWritten: 0,
+  });
+  assertKnowledgeNotCancelled(dependencies);
   let chunkResults;
   if (effectiveBackend.backend === 'http') {
     chunkResults = await mapWithConcurrency(
@@ -1176,10 +1450,12 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
           chunkIndex: index,
           chunkCount: chunks.length,
         }),
+      () => typeof dependencies.isCancelled === 'function' && dependencies.isCancelled(),
     );
   } else {
     chunkResults = [];
     for (let index = 0; index < chunks.length; index++) {
+      assertKnowledgeNotCancelled(dependencies);
       chunkResults.push(
         await summarizeMessagesAdaptive(chunks[index], {
           repoPath: config.repoPath,
@@ -1193,103 +1469,228 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
     }
   }
 
-  const chunkSummaries = chunkResults.flatMap((result) => result.summaries).filter(summaryHasContent);
-  const effectiveChunkCount = chunkResults.reduce((sum, result) => sum + result.leafChunkCount, 0);
+  const leafResults = chunkResults.flatMap((result) => result.leafResults)
+    .filter((result) => summaryHasContent(result.summary));
+  const effectiveChunkCount = leafResults.length;
   const retriedForEmptySummary = chunkResults.some((result) => result.retriedForEmptySummary);
+  reportKnowledgeProgress(dependencies, {
+    currentPhase: 'summarizing_content',
+    plannedChunkGroups: effectiveChunkCount,
+    completedChunkGroups: 0,
+    filesWritten: 0,
+    retriedForEmptySummary,
+  });
+  assertKnowledgeNotCancelled(dependencies);
 
-  if (chunkSummaries.length === 0) {
+  if (leafResults.length === 0) {
     throw new Error(
       'Knowledge indexing produced no usable summary content. Try a stronger model or reduce CHAT_SEARCH_KNOWLEDGE_MAX_CHARS.',
     );
   }
 
-  let finalSummary = chunkSummaries[0];
-  if (chunkSummaries.length > 1) {
-    try {
-      finalSummary = await summarizeChunk(
-        buildMergePrompt(chunkSummaries, { repoPath: config.repoPath }),
-        effectiveBackend,
-        config,
-        dependencies,
-      );
-      if (!summaryHasContent(finalSummary)) {
-        finalSummary = mergeSummariesDeterministically(chunkSummaries);
-      }
-    } catch {
-      finalSummary = mergeSummariesDeterministically(chunkSummaries);
-    }
-  }
-
   const createdAt = (dependencies.now || nowIso)();
-  const runId = buildKnowledgeRunId(pendingMessages, createdAt);
-  const relativePath = relativeRunPath(runId);
-  const absolutePath = join(getKnowledgeRoot(config), relativePath);
-  const markdown = renderKnowledgeSummary(
-    finalSummary,
-    buildRunSummaryMetadata(pendingMessages, effectiveChunkCount, effectiveBackend, createdAt, runId),
-  );
+  const batchId = buildKnowledgeRunId(pendingMessages, createdAt);
 
   mkdirSync(getKnowledgeRunsDir(config), { recursive: true });
-  writeFileSync(absolutePath, markdown, 'utf8');
+
+  let contentSummaries;
+  if (effectiveBackend.backend === 'http') {
+    contentSummaries = await mapWithConcurrency(
+      leafResults,
+      Math.max(1, config.knowledge?.httpConcurrency || 3),
+      async (leafResult, index) =>
+        summarizeChunkContent(leafResult.messages, leafResult.summary, {
+          repoPath: config.repoPath,
+          effectiveBackend,
+          config,
+          dependencies,
+          chunkIndex: index,
+          chunkCount: leafResults.length,
+        }),
+      () => typeof dependencies.isCancelled === 'function' && dependencies.isCancelled(),
+    );
+  } else {
+    contentSummaries = [];
+    for (let index = 0; index < leafResults.length; index++) {
+      assertKnowledgeNotCancelled(dependencies);
+      contentSummaries.push(
+        await summarizeChunkContent(leafResults[index].messages, leafResults[index].summary, {
+          repoPath: config.repoPath,
+          effectiveBackend,
+          config,
+          dependencies,
+          chunkIndex: index,
+          chunkCount: leafResults.length,
+        }),
+      );
+    }
+  }
 
   const nextManifest = force ? emptyManifest(config) : cloneManifest(manifest);
   const removedRuns = force
     ? [...manifest.runs]
-    : nextManifest.runs.filter((run) => invalidRunIds.has(run.id));
+    : nextManifest.runs.filter((run) => invalidGroupIds.has(run.groupId || run.id));
   if (!force) {
-    nextManifest.runs = nextManifest.runs.filter((run) => !invalidRunIds.has(run.id));
+    nextManifest.runs = nextManifest.runs.filter((run) => !invalidGroupIds.has(run.groupId || run.id));
   }
 
   for (const [messageId, entry] of Object.entries(nextManifest.indexedMessages)) {
-    if (force || invalidRunIds.has(entry.runId)) {
+    if (force || invalidGroupIds.has(entry.groupId || entry.runId)) {
       delete nextManifest.indexedMessages[messageId];
     }
   }
 
-  const runRecord = {
-    id: runId,
-    createdAt,
-    backend: effectiveBackend.backend,
-    provider,
-    providersIndexed,
-    sessionCountsByProvider,
-    messageCountsByProvider,
-    messageCount: pendingMessages.length,
-    firstMessageTs: pendingMessages[0]?.timestamp || null,
-    lastMessageTs: pendingMessages[pendingMessages.length - 1]?.timestamp || null,
-    messageIds: pendingMessages.map((message) => getMessageCacheKey(message)),
-    filePath: relativePath,
-    chunkCount: effectiveChunkCount,
-    inputChars: serializeTranscript(pendingMessages).length,
-    outputChars: markdown.length,
-    configFingerprint: configFingerprint(config),
-    model: config.knowledge?.model || null,
-    retriedForEmptySummary,
-  };
-
   nextManifest.configFingerprint = configFingerprint(config);
-  nextManifest.runs.push(runRecord);
-  nextManifest.runs.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const writtenFilePaths = [];
+  reportKnowledgeProgress(dependencies, {
+    currentPhase: 'writing_files',
+    plannedChunkGroups: effectiveChunkCount,
+    completedChunkGroups: 0,
+    filesWritten: 0,
+    batchId,
+  });
 
-  for (const message of pendingMessages) {
-    const key = getMessageCacheKey(message);
-    nextManifest.indexedMessages[key] = {
-      hash: getMessageCacheHash(message),
-      indexedAt: createdAt,
-      runId,
+  for (let index = 0; index < leafResults.length; index++) {
+    assertKnowledgeNotCancelled(dependencies);
+    const leafResult = leafResults[index];
+    const chunkMessages = leafResult.messages;
+    const groupId = buildKnowledgeChunkRunId(chunkMessages, createdAt, batchId, index);
+    const knowledgeRunId = `${groupId}-knowledge`;
+    const summaryRunId = `${groupId}-summary`;
+    const knowledgeRelativePath = relativeRunPath(knowledgeRunId, 'knowledge');
+    const summaryRelativePath = relativeRunPath(summaryRunId, 'content_summary');
+    const knowledgeAbsolutePath = join(getKnowledgeRoot(config), knowledgeRelativePath);
+    const summaryAbsolutePath = join(getKnowledgeRoot(config), summaryRelativePath);
+    const knowledgeMarkdown = renderKnowledgeSummary(
+      leafResult.summary,
+      {
+        ...buildRunSummaryMetadata(chunkMessages, 1, effectiveBackend, createdAt, knowledgeRunId),
+        batchId,
+        chunkIndex: index + 1,
+        batchChunkCount: leafResults.length,
+      },
+    );
+    const contentMarkdown = renderContentSummary(
+      contentSummaries[index],
+      {
+        runId: summaryRunId,
+        batchId,
+        chunkIndex: index + 1,
+        batchChunkCount: leafResults.length,
+        createdAt,
+        backend: effectiveBackend.backend,
+        messageCount: chunkMessages.length,
+      },
+    );
+
+    writeFileSync(knowledgeAbsolutePath, knowledgeMarkdown, 'utf8');
+    writeFileSync(summaryAbsolutePath, contentMarkdown, 'utf8');
+    writtenFilePaths.push(knowledgeAbsolutePath, summaryAbsolutePath);
+
+    const baseRunRecord = {
+      groupId,
+      batchId,
+      chunkIndex: index + 1,
+      batchChunkCount: leafResults.length,
+      createdAt,
+      backend: effectiveBackend.backend,
+      provider,
+      providersIndexed: Object.keys(countMessagesByProvider(chunkMessages)).sort(),
+      sessionCountsByProvider: countSessionsByProvider(
+        sessions.filter((session) =>
+          chunkMessages.some(
+            (message) =>
+              message.provider === session.provider &&
+              message.sessionId === session.sessionId,
+          ),
+        ),
+      ),
+      messageCountsByProvider: countMessagesByProvider(chunkMessages),
+      messageCount: chunkMessages.length,
+      firstMessageTs: chunkMessages[0]?.timestamp || null,
+      lastMessageTs: chunkMessages[chunkMessages.length - 1]?.timestamp || null,
+      sessionIds: [...new Set(chunkMessages.map((message) => message.sessionId).filter(Boolean))],
+      sessionRefs: [...new Set(
+        chunkMessages
+          .map((message) => (message.provider && message.sessionId ? `${message.provider}:${message.sessionId}` : null))
+          .filter(Boolean),
+      )],
+      messageIds: chunkMessages.map((message) => getMessageCacheKey(message)),
+      chunkCount: 1,
+      inputChars: serializeTranscript(chunkMessages).length,
+      configFingerprint: configFingerprint(config),
+      model: config.knowledge?.model || null,
+      retriedForEmptySummary,
     };
+
+    nextManifest.runs.push({
+      ...baseRunRecord,
+      id: knowledgeRunId,
+      kind: 'knowledge',
+      filePath: knowledgeRelativePath,
+      outputChars: knowledgeMarkdown.length,
+    });
+    nextManifest.runs.push({
+      ...baseRunRecord,
+      id: summaryRunId,
+      kind: 'content_summary',
+      filePath: summaryRelativePath,
+      outputChars: contentMarkdown.length,
+    });
+    for (const message of chunkMessages) {
+      const key = getMessageCacheKey(message);
+      nextManifest.indexedMessages[key] = {
+        hash: getMessageCacheHash(message),
+        indexedAt: createdAt,
+        runId: knowledgeRunId,
+        groupId,
+      };
+    }
+
+    reportKnowledgeProgress(dependencies, {
+      currentPhase: 'writing_files',
+      batchId,
+      plannedChunkGroups: effectiveChunkCount,
+      completedChunkGroups: index + 1,
+      filesWritten: writtenFilePaths.length,
+    });
   }
+
+  nextManifest.runs.sort((left, right) => {
+    const leftFirst = left.firstMessageTs || '';
+    const rightFirst = right.firstMessageTs || '';
+    if (leftFirst !== rightFirst) {
+      return leftFirst.localeCompare(rightFirst);
+    }
+    if (left.createdAt !== right.createdAt) {
+      return left.createdAt.localeCompare(right.createdAt);
+    }
+    if ((left.chunkIndex || 0) !== (right.chunkIndex || 0)) {
+      return (left.chunkIndex || 0) - (right.chunkIndex || 0);
+    }
+    if ((left.kind || 'knowledge') !== (right.kind || 'knowledge')) {
+      return (left.kind || 'knowledge') === 'knowledge' ? -1 : 1;
+    }
+    return left.id.localeCompare(right.id);
+  });
 
   saveKnowledgeManifest(config, nextManifest);
 
   for (const run of removedRuns) {
     const oldPath = join(getKnowledgeRoot(config), run.filePath);
-    if (oldPath !== absolutePath && fileExists(oldPath)) {
+    if (!writtenFilePaths.includes(oldPath) && fileExists(oldPath)) {
       rmSync(oldPath, { force: true });
     }
   }
 
   cleanupUnreferencedRunFiles(config, nextManifest.runs);
+  reportKnowledgeProgress(dependencies, {
+    currentPhase: 'completed',
+    batchId,
+    plannedChunkGroups: effectiveChunkCount,
+    completedChunkGroups: effectiveChunkCount,
+    filesWritten: writtenFilePaths.length,
+  });
 
   return {
     status: 'indexed',
@@ -1297,16 +1698,18 @@ export async function runKnowledgeIndex(sessions, config, params = {}, dependenc
     messagesSeen: messages.length,
     newMessages: pendingMessages.length,
     pendingMessages: 0,
-    filesWritten: 1,
+    filesWritten: writtenFilePaths.length,
     chunkCount: effectiveChunkCount,
     providerFilter: provider,
     providersIndexed,
     sessionCountsByProvider,
     messageCountsByProvider,
     retriedForEmptySummary,
-    filePath: absolutePath,
+    batchId,
+    filePath: writtenFilePaths[0],
+    filePaths: writtenFilePaths,
     gitignorePath,
-    runId,
+    runId: batchId,
   };
 }
 

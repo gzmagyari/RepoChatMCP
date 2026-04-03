@@ -197,7 +197,7 @@ test('MCP: initialize also works with legacy Content-Length framing', async () =
   }
 });
 
-test('MCP: tools/list returns 8 tools with correct names', async () => {
+test('MCP: tools/list returns 15 tools with correct names', async () => {
   const fixtures = setupTempFixtures();
   const proc = spawnMcp(fixtures);
 
@@ -225,18 +225,25 @@ test('MCP: tools/list returns 8 tools with correct names', async () => {
     assert.equal(response.id, 2);
     assert.ok(response.result, 'should have result');
     assert.ok(response.result.tools, 'should have tools array');
-    assert.equal(response.result.tools.length, 8, 'should have exactly 8 tools');
+    assert.equal(response.result.tools.length, 15, 'should have exactly 15 tools');
 
     const toolNames = response.result.tools.map((t) => t.name).sort();
     assert.deepEqual(toolNames, [
-      'chat.base_knowledge',
+      'chat.cancel_knowledge_index',
       'chat.compaction_knowledge',
+      'chat.get_knowledge_index_status',
       'chat.grep',
-      'chat.knowledge_index',
+      'chat.list_knowledge_batches',
+      'chat.list_knowledge_files',
       'chat.list_sessions',
+      'chat.read_knowledge_batch',
+      'chat.read_knowledge_file',
+      'chat.read_latest_knowledge',
       'chat.read_lines',
       'chat.read_session',
       'chat.search',
+      'chat.search_knowledge',
+      'chat.start_knowledge_index',
     ]);
   } finally {
     proc.kill();
@@ -290,7 +297,7 @@ test('MCP: tools/call chat.list_sessions returns session data', async () => {
   }
 });
 
-test('MCP: knowledge tools return disabled indexing state by default', async () => {
+test('MCP: async knowledge tools return disabled or empty state by default', async () => {
   const fixtures = setupTempFixtures();
   const proc = spawnMcp(fixtures);
 
@@ -306,22 +313,22 @@ test('MCP: knowledge tools return disabled indexing state by default', async () 
       },
     });
 
-    const baseKnowledge = await sendRpc(proc, {
+    const startIndex = await sendRpc(proc, {
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/call',
       params: {
-        name: 'chat.base_knowledge',
+        name: 'chat.start_knowledge_index',
         arguments: {},
       },
     });
 
-    const indexKnowledge = await sendRpc(proc, {
+    const latestKnowledge = await sendRpc(proc, {
       jsonrpc: '2.0',
       id: 3,
       method: 'tools/call',
       params: {
-        name: 'chat.knowledge_index',
+        name: 'chat.read_latest_knowledge',
         arguments: {},
       },
     });
@@ -336,16 +343,13 @@ test('MCP: knowledge tools return disabled indexing state by default', async () 
       },
     });
 
-    const baseData = JSON.parse(baseKnowledge.result.content[0].text);
-    const indexData = JSON.parse(indexKnowledge.result.content[0].text);
+    const startData = JSON.parse(startIndex.result.content[0].text);
+    const latestData = JSON.parse(latestKnowledge.result.content[0].text);
     const compactionData = JSON.parse(compactionKnowledge.result.content[0].text);
 
-    assert.equal(baseData.indexing.enabled, false);
-    assert.ok(path.isAbsolute(baseData.combinedKnowledgeFilePath));
-    assert.equal('heuristicEntries' in baseData, false);
-    assert.equal('heuristicsFilePath' in baseData, false);
-    assert.equal(typeof baseData.message, 'string');
-    assert.equal(indexData.status, 'disabled');
+    assert.equal(startData.status, 'disabled');
+    assert.equal(latestData.status, 'empty');
+    assert.equal(latestData.kind, 'combined');
     assert.ok(Array.isArray(compactionData.compactionEntries));
     assert.ok(path.isAbsolute(compactionData.compactionsFilePath));
   } finally {
@@ -354,24 +358,9 @@ test('MCP: knowledge tools return disabled indexing state by default', async () 
   }
 });
 
-test('MCP: chat.knowledge_index returns structured error details when indexing fails', async () => {
+test('MCP: legacy knowledge tool names return explicit deprecation errors', async () => {
   const fixtures = setupTempFixtures();
-  const claudeSessionPath = path.join(
-    fixtures.claudeRoot,
-    '-tmp-test-repo',
-    'claude-test-session.jsonl',
-  );
-  const originalContent = fs.readFileSync(claudeSessionPath, 'utf8').trim();
-  fs.writeFileSync(
-    claudeSessionPath,
-    Array.from({ length: 20 }, () => originalContent).join('\n') + '\n',
-    'utf8',
-  );
-  const proc = spawnMcp(fixtures, {
-    CHAT_SEARCH_KNOWLEDGE_BACKEND: 'http',
-    CHAT_SEARCH_KNOWLEDGE_API_KEY: '',
-    CHAT_SEARCH_KNOWLEDGE_MODEL: '',
-  });
+  const proc = spawnMcp(fixtures);
 
   try {
     await sendRpc(proc, {
@@ -396,18 +385,13 @@ test('MCP: chat.knowledge_index returns structured error details when indexing f
     });
 
     assert.equal(response.id, 2);
-    assert.equal(response.result.isError, false);
+    assert.equal(response.result.isError, true);
 
     const data = JSON.parse(response.result.content[0].text);
-    assert.equal(data.status, 'error');
-    assert.equal(data.backend, 'http');
-    assert.equal(data.providerFilter, null);
-    assert.deepEqual(data.providersIndexed, ['claude']);
-    assert.deepEqual(data.sessionCountsByProvider, { claude: 1 });
-    assert.ok(typeof data.message === 'string');
-    assert.match(data.message, /requires CHAT_SEARCH_KNOWLEDGE_API_KEY and CHAT_SEARCH_KNOWLEDGE_MODEL/i);
-    assert.equal(data.error.type, 'Error');
-    assert.match(data.error.message, /requires CHAT_SEARCH_KNOWLEDGE_API_KEY and CHAT_SEARCH_KNOWLEDGE_MODEL/i);
+    assert.equal(data.status, 'deprecated');
+    assert.equal(data.tool, 'chat.knowledge_index');
+    assert.ok(Array.isArray(data.replacements));
+    assert.match(data.message, /replaced by async job tools/i);
   } finally {
     proc.kill();
     fixtures.cleanup();
